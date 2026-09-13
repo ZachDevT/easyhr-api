@@ -27,6 +27,7 @@ import (
 	"github.com/easyhr/easyhr-be/internal/signatures"
 	"github.com/easyhr/easyhr-be/internal/tenancy"
 	"github.com/easyhr/easyhr-be/internal/timeoff"
+	"github.com/easyhr/easyhr-be/internal/workflows"
 )
 
 type Server struct {
@@ -43,6 +44,7 @@ type Server struct {
 	relations     *relations.Service
 	hiring        *hiring.Service
 	performance   *performance.Service
+	workflows     *workflows.Service
 	attendance    *attendance.Service
 	onboarding    *onboarding.Service
 	documents     *documents.Service
@@ -74,7 +76,7 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 		MaxAge:           86400,
 	}))
 
-	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
+	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
 	if authentication != nil {
 		s.authenticated = e.Group("/api/v1")
 		s.authenticated.Use(adaptHTTPMiddleware(authentication))
@@ -1344,4 +1346,70 @@ func (s *Server) createFeedbackRecord(c echo.Context) error {
 		return problem(c, http.StatusInternalServerError, "performance.create_failed", "Internal error", "Could not create")
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listWorkflowDefinitions(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.workflows.ListDefinitions(c.Request().Context(), principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "workflows.list_definitions_failed", "Internal error", "Could not fetch workflows")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createWorkflowDefinition(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("workflows:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
+	}
+	var input workflows.CreateDefinitionInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	result, err := s.workflows.CreateDefinition(c.Request().Context(), principal.OrganizationID, principal.UserID, input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "workflows.create_failed", "Internal error", "Could not create")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listInboxTasks(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.workflows.ListInbox(c.Request().Context(), principal.UserID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "workflows.list_inbox_failed", "Internal error", "Could not fetch inbox")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) decideWorkflowTask(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	var input workflows.DecideTaskInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	err := s.workflows.DecideTask(c.Request().Context(), principal.UserID, c.Param("taskId"), input)
+	if err != nil {
+		if errors.Is(err, workflows.ErrNotFound) {
+			return problem(c, http.StatusNotFound, "workflows.task_not_found", "Not found", "Task not found")
+		}
+		return problem(c, http.StatusInternalServerError, "workflows.decide_failed", "Internal error", "Could not process decision")
+	}
+	return c.JSON(http.StatusOK, map[string]string{"status": "success"})
 }
