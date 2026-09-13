@@ -1,0 +1,34 @@
+package documents
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+type DownloadUrl struct {
+	URL       string `json:"url"`
+	ExpiresAt string `json:"expiresAt"`
+}
+
+func (service *Service) GetDownloadUrl(ctx context.Context, organizationID, actorUserID, documentID string) (DownloadUrl, error) {
+	var objectKey string
+	var status string
+	err := service.pool.QueryRow(ctx, `SELECT object_key, status FROM documents WHERE id = $1 AND organization_id = $2`, documentID, organizationID).Scan(&objectKey, &status)
+	if err != nil {
+		return DownloadUrl{}, ErrDocumentNotFound
+	}
+	if status != "ready" && status != "archived" {
+		return DownloadUrl{}, fmt.Errorf("document is not ready for download")
+	}
+
+	url, err := service.storage.DownloadURL(ctx, objectKey, 15*time.Minute)
+	if err != nil {
+		return DownloadUrl{}, fmt.Errorf("could not generate download url: %w", err)
+	}
+
+	return DownloadUrl{
+		URL:       url,
+		ExpiresAt: time.Now().UTC().Add(15 * time.Minute).Format(time.RFC3339),
+	}, nil
+}

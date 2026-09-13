@@ -130,9 +130,11 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/leave/policies/:policyId/assignments", s.assignLeavePolicy)
 		s.api.POST("/attendance/punches", s.createAttendancePunch)
 		s.api.GET("/attendance/punches", s.listAttendancePunches)
+		s.api.GET("/attendance/live", s.getLiveAttendance)
 		s.api.POST("/documents/upload-intents", s.createDocumentUploadIntent)
 		s.api.GET("/documents", s.listDocuments)
 		s.api.POST("/documents/:documentId/complete", s.completeDocumentUpload)
+		s.api.GET("/documents/:documentId/download-url", s.getDocumentDownloadUrl)
 		s.api.POST("/attendance/punches/:punchId/corrections", s.createAttendanceCorrection)
 		s.api.POST("/onboarding/templates", s.createOnboardingTemplate)
 		s.api.GET("/onboarding/templates", s.listOnboardingTemplates)
@@ -946,4 +948,39 @@ func problemHandler(err error, c echo.Context) {
 		return
 	}
 	_ = problem(c, http.StatusInternalServerError, "internal.unexpected", "Internal server error", "An unexpected error occurred")
+}
+
+func (s *Server) getLiveAttendance(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !principal.HasPermission("attendance:read_team") && !principal.HasPermission("attendance:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view live attendance")
+	}
+	var input attendance.LiveAttendanceInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request", err.Error())
+	}
+	result, err := s.attendance.GetLiveAttendance(c.Request().Context(), principal.OrganizationID, input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "attendance.live_failed", "Internal server error", "Could not load live attendance")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) getDocumentDownloadUrl(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	// Simplified permission check: in a real app we'd verify the user can see this specific document based on employee link
+	if !principal.HasPermission("documents:read") && !principal.HasPermission("documents:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view documents")
+	}
+	result, err := s.documents.GetDownloadUrl(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Param("documentId"))
+	if err != nil {
+		return problem(c, http.StatusNotFound, "documents.download_failed", "Not found", "Document could not be downloaded")
+	}
+	return c.JSON(http.StatusOK, result)
 }

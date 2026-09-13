@@ -14,6 +14,7 @@ import (
 
 type Storage interface {
 	UploadURL(ctx context.Context, objectKey, contentType string, sizeBytes int64, expiresIn time.Duration) (string, error)
+	DownloadURL(ctx context.Context, objectKey string, expiresIn time.Duration) (string, error)
 }
 
 type S3Config struct {
@@ -62,6 +63,17 @@ func (storage *S3Storage) UploadURL(ctx context.Context, objectKey, contentType 
 	}, s3.WithPresignExpires(expiresIn))
 	if err != nil {
 		return "", fmt.Errorf("presign document upload: %w", err)
+	}
+	return result.URL, nil
+}
+
+func (storage *S3Storage) DownloadURL(ctx context.Context, objectKey string, expiresIn time.Duration) (string, error) {
+	result, err := storage.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(storage.bucket),
+		Key:    aws.String(objectKey),
+	}, s3.WithPresignExpires(expiresIn))
+	if err != nil {
+		return "", fmt.Errorf("presign document download: %w", err)
 	}
 	return result.URL, nil
 }
