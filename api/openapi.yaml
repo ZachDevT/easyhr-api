@@ -1740,6 +1740,94 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
+  /roles:
+    get:
+      tags: [Identity]
+      summary: List all roles in the organization
+      operationId: listRoles
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Role' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Identity]
+      summary: Create a custom role
+      operationId: createRole
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRole' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Role' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /roles/{id}/permissions:
+    put:
+      tags: [Identity]
+      summary: Update permissions for a role
+      operationId: updateRolePermissions
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateRolePermissions' }
+      responses:
+        '200':
+          description: OK
+        default:
+          $ref: '#/components/responses/Problem'
+  /employees/{employeeId}/roles:
+    post:
+      tags: [Identity]
+      summary: Assign a role to an employee
+      operationId: assignRoleToEmployee
+      parameters:
+        - name: employeeId
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssignRole' }
+      responses:
+        '200':
+          description: OK
+        default:
+          $ref: '#/components/responses/Problem'
+  /platform/audit-logs:
+    get:
+      tags: [Platform]
+      summary: List audit logs across the platform
+      operationId: listPlatformAuditLogs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AuditEvent' }
+        default:
+          $ref: '#/components/responses/Problem'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2451,6 +2539,44 @@ components:
       required: [enabled]
       properties:
         enabled: { type: boolean }
+
+    Role:
+      type: object
+      required: [id, name, isCustom]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        name: { type: string }
+        description: { type: string }
+        isCustom: { type: boolean }
+    CreateRole:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        description: { type: string }
+    UpdateRolePermissions:
+      type: object
+      required: [permissionNames]
+      properties:
+        permissionNames:
+          type: array
+          items: { type: string }
+    AssignRole:
+      type: object
+      required: [roleId]
+      properties:
+        roleId: { $ref: '#/components/schemas/Id' }
+    AuditEvent:
+      type: object
+      required: [id, aggregateId, aggregateType, eventType, timestamp]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        organizationId: { $ref: '#/components/schemas/Id' }
+        aggregateId: { $ref: '#/components/schemas/Id' }
+        aggregateType: { type: string }
+        eventType: { type: string }
+        userId: { $ref: '#/components/schemas/Id' }
+        timestamp: { type: string, format: date-time }
 
   responses:
     Problem:

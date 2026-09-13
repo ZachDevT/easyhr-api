@@ -2160,3 +2160,92 @@ func (s *Server) setTenantFeatureOverride(c echo.Context) error {
 	}
 	return c.NoContent(http.StatusOK)
 }
+
+// Identity Roles
+func (s *Server) listRoles(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.identity.ListRoles(c.Request().Context(), principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "roles.list_failed", "Internal error", "Could not fetch roles")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createRole(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("settings:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
+	}
+
+	var input identity.CreateRoleInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	result, err := s.identity.CreateRole(c.Request().Context(), principal.OrganizationID, input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "roles.create_failed", "Internal error", "Could not create role")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) updateRolePermissions(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("settings:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
+	}
+
+	var input identity.UpdateRolePermissionsInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	if err := s.identity.UpdateRolePermissions(c.Request().Context(), principal.OrganizationID, c.Param("id"), input); err != nil {
+		return problem(c, http.StatusInternalServerError, "roles.update_failed", "Internal error", "Could not update permissions")
+	}
+	return c.NoContent(http.StatusOK)
+}
+
+func (s *Server) assignRoleToEmployee(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("employees:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
+	}
+
+	var input identity.AssignRole
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	if err := s.identity.AssignRoleToEmployee(c.Request().Context(), principal.OrganizationID, c.Param("employeeId"), input.RoleID); err != nil {
+		return problem(c, http.StatusInternalServerError, "roles.assign_failed", "Internal error", "Could not assign role")
+	}
+	return c.NoContent(http.StatusOK)
+}
+
+// Platform Audit
+func (s *Server) listPlatformAuditLogs(c echo.Context) error {
+	_, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.operations.ListPlatformAuditLogs(c.Request().Context())
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "audit.list_failed", "Internal error", "Could not fetch audit logs")
+	}
+	return c.JSON(http.StatusOK, result)
+}
