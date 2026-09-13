@@ -989,7 +989,9 @@ func (s *Server) getDocumentDownloadUrl(c echo.Context) error {
 
 func (s *Server) listPayrollConfigurations(c echo.Context) error {
 	principal, ok := identity.PrincipalFromContext(c.Request().Context())
-	if !ok { return c.NoContent(http.StatusUnauthorized) }
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
 	if !principal.HasPermission("payroll:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view payroll configurations")
 	}
@@ -1002,7 +1004,9 @@ func (s *Server) listPayrollConfigurations(c echo.Context) error {
 
 func (s *Server) listPayrollPeriods(c echo.Context) error {
 	principal, ok := identity.PrincipalFromContext(c.Request().Context())
-	if !ok { return c.NoContent(http.StatusUnauthorized) }
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
 	if !principal.HasPermission("payroll:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view payroll periods")
 	}
@@ -1015,7 +1019,9 @@ func (s *Server) listPayrollPeriods(c echo.Context) error {
 
 func (s *Server) createPayrollPeriod(c echo.Context) error {
 	principal, ok := identity.PrincipalFromContext(c.Request().Context())
-	if !ok { return c.NoContent(http.StatusUnauthorized) }
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
 	if !principal.HasPermission("payroll:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage payroll")
 	}
@@ -1032,7 +1038,9 @@ func (s *Server) createPayrollPeriod(c echo.Context) error {
 
 func (s *Server) createPayrollRun(c echo.Context) error {
 	principal, ok := identity.PrincipalFromContext(c.Request().Context())
-	if !ok { return c.NoContent(http.StatusUnauthorized) }
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
 	if !principal.HasPermission("payroll:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage payroll")
 	}
@@ -1048,7 +1056,9 @@ func (s *Server) createPayrollRun(c echo.Context) error {
 
 func (s *Server) lockPayrollRun(c echo.Context) error {
 	principal, ok := identity.PrincipalFromContext(c.Request().Context())
-	if !ok { return c.NoContent(http.StatusUnauthorized) }
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
 	if !principal.HasPermission("payroll:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage payroll")
 	}
