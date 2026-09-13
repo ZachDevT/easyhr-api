@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: easyhr
+      POSTGRES_USER: easyhr
+      POSTGRES_PASSWORD: easyhr
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U easyhr -d easyhr"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: easyhr-minio
+      MINIO_ROOT_PASSWORD: replace-with-a-local-dev-secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >-
+      /bin/sh -c "until mc alias set easyhr http://minio:9000 easyhr-minio replace-with-a-local-dev-secret; do sleep 1; done;
+      mc mb --ignore-existing easyhr/easyhr-documents"
+
+volumes:
+  postgres_data:
+  minio_data:

@@ -1,0 +1,1090 @@
+openapi: 3.1.0
+info:
+  title: EasyHR Customer API
+  version: 0.1.0
+  description: |
+    First-contract API for the EasyHR multi-tenant HR platform. The authenticated
+    membership determines the organization; clients must never send an organization ID
+    to select a tenant. Tenant routes require `X-EasyHR-Workspace`, containing the
+    normalized workspace subdomain, in addition to the bearer token. All timestamps
+    are RFC 3339 UTC timestamps.
+servers:
+  - url: https://api.easyhr.example/api/v1
+    description: Production (replace with the real domain before launch)
+  - url: http://localhost:8080/api/v1
+    description: Local development
+security:
+  - bearerAuth: []
+tags:
+  - name: Context
+  - name: Employees
+  - name: Leave
+  - name: Attendance
+  - name: Onboarding
+  - name: Documents
+paths:
+  /auth/provision:
+    post:
+      tags: [Context]
+      summary: Synchronize the verified identity-provider user into EasyHR
+      description: |
+        Uses the verified JWT subject to retrieve the account from Clerk and writes
+        a local user record. Browser-supplied profile data is not accepted. Call
+        this after sign-up/sign-in and before first organization setup.
+      operationId: provisionAuthenticatedIdentity
+      responses:
+        '204':
+          description: Local identity provisioned or refreshed
+        default:
+          $ref: '#/components/responses/Problem'
+  /setup/organizations:
+    post:
+      tags: [Context]
+      summary: Create the caller's first EasyHR organization and workspace
+      description: |
+        This bootstrap route requires a verified bearer token but intentionally does
+        not require an existing membership. The Clerk user must already have been
+        provisioned locally by the identity sync. It creates the organization, legal
+        profile, workspace, owner membership and initial departments atomically.
+      operationId: createOrganizationSetup
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrganizationSetupRequest' }
+      responses:
+        '201':
+          description: Organization and owner membership created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrganizationSetupResponse' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /me:
+    get:
+      tags: [Context]
+      summary: Get the authenticated user and active organization membership
+      operationId: getMe
+      responses:
+        '200':
+          description: Current user context
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionContextResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /employees:
+    get:
+      tags: [Employees]
+      summary: List employees visible to the caller
+      operationId: listEmployees
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 120 }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/EmployeeStatus' }
+        - name: departmentId
+          in: query
+          schema: { $ref: '#/components/schemas/Id' }
+      responses:
+        '200':
+          description: A stable, cursor-paginated page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmployeePage'
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Employees]
+      summary: Create an employee record
+      operationId: createEmployee
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateEmployeeRequest' }
+      responses:
+        '201':
+          description: Employee created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateEmployeeResponse' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /employees/{employeeId}:
+    parameters:
+      - $ref: '#/components/parameters/EmployeeId'
+    get:
+      tags: [Employees]
+      summary: Get an employee record
+      operationId: getEmployee
+      responses:
+        '200':
+          description: Employee
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Employee' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /departments:
+    get:
+      tags: [Organization]
+      summary: List departments
+      operationId: listDepartments
+      responses:
+        '200':
+          description: Departments
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Department' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /divisions:
+    get:
+      tags: [Organization]
+      summary: List divisions
+      operationId: listDivisions
+      responses:
+        '200':
+          description: Divisions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Division' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Organization]
+      summary: Create a division
+      operationId: createDivision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateDivisionRequest' }
+      responses:
+        '201':
+          description: Division created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Division' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Organization]
+      summary: Create a department
+      operationId: createDepartment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateDepartmentRequest' }
+      responses:
+        '201':
+          description: Department created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Department' }
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags: [Employees]
+      summary: Update permitted employee profile fields
+      description: Compensation, legal identity and employment-term changes use separate audited endpoints.
+      operationId: updateEmployee
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateEmployeeRequest' }
+      responses:
+        '200':
+          description: Updated employee
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Employee' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /leave/balances:
+    get:
+      tags: [Leave]
+      summary: List leave balances the caller may view
+      operationId: listLeaveBalances
+      parameters:
+        - name: employeeId
+          in: query
+          schema: { $ref: '#/components/schemas/Id' }
+      responses:
+        '200':
+          description: Leave ledger balances
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/LeaveBalance' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /leave/requests:
+    get:
+      tags: [Leave]
+      summary: List leave requests visible to the caller
+      operationId: listLeaveRequests
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: employeeId
+          in: query
+          schema: { $ref: '#/components/schemas/Id' }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/LeaveRequestStatus' }
+      responses:
+        '200':
+          description: Leave request page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeaveRequestPage' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Leave]
+      summary: Submit a leave request
+      operationId: createLeaveRequest
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateLeaveRequest' }
+      responses:
+        '201':
+          description: Request submitted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeaveRequest' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /leave/requests/{requestId}/approve:
+    post:
+      tags: [Leave]
+      summary: Approve a pending leave request
+      operationId: approveLeaveRequest
+      parameters:
+        - $ref: '#/components/parameters/LeaveRequestId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comment: { type: string, maxLength: 2000 }
+      responses:
+        '200':
+          description: Request approved and ledger reservation recorded atomically
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeaveRequestDecision' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /leave/requests/{requestId}/decline:
+    post:
+      tags: [Leave]
+      summary: Decline a pending leave request
+      operationId: declineLeaveRequest
+      parameters:
+        - $ref: '#/components/parameters/LeaveRequestId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        '200':
+          description: Request declined
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeaveRequestDecision' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /leave/requests/{requestId}/cancel:
+    post:
+      tags: [Leave]
+      summary: Cancel the caller's pending leave request
+      operationId: cancelLeaveRequest
+      parameters:
+        - $ref: '#/components/parameters/LeaveRequestId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Request cancelled and reservation released
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeaveRequestDecision' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /attendance/punches:
+    get:
+      tags: [Attendance]
+      summary: List attendance punches for an employee
+      operationId: listAttendancePunches
+      parameters:
+        - name: employeeId
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/Id' }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Attendance-punch page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AttendancePunchPage' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Attendance]
+      summary: Record an employee clock-in or clock-out punch
+      description: The server determines organization, employee eligibility, time zone and policy outcome. Client location is evidence, not proof.
+      operationId: createAttendancePunch
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAttendancePunch' }
+      responses:
+        '201':
+          description: Immutable attendance punch recorded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AttendancePunch' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /attendance/live:
+    get:
+      tags: [Attendance]
+      summary: List today's attendance status for authorized team scope
+      operationId: getLiveAttendance
+      parameters:
+        - name: date
+          in: query
+          description: Local organization date; defaults to today.
+          schema: { type: string, format: date }
+        - name: status
+          in: query
+          schema: { type: string, enum: [clocked_in, clocked_out, late, missing] }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Live attendance page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LiveAttendancePage' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /attendance/punches/{punchId}/corrections:
+    post:
+      tags: [Attendance]
+      summary: Create an audited correction to an attendance punch
+      operationId: createAttendanceCorrection
+      parameters:
+        - $ref: '#/components/parameters/PunchId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAttendanceCorrection' }
+      responses:
+        '201':
+          description: Correction recorded; original punch remains unchanged
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AttendancePunch' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /onboarding/templates:
+    post:
+      tags: [Onboarding]
+      summary: Create a draft onboarding template
+      operationId: createOnboardingTemplate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOnboardingTemplate' }
+      responses:
+        '201':
+          description: Draft template created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OnboardingTemplate' }
+        default:
+          $ref: '#/components/responses/Problem'
+    get:
+      tags: [Onboarding]
+      summary: List onboarding templates
+      operationId: listOnboardingTemplates
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [draft, published, archived] }
+      responses:
+        '200':
+          description: Templates
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/OnboardingTemplate' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /onboarding/templates/{templateId}/publish:
+    post:
+      tags: [Onboarding]
+      summary: Publish a draft onboarding template
+      operationId: publishOnboardingTemplate
+      parameters:
+        - $ref: '#/components/parameters/TemplateId'
+      responses:
+        '200':
+          description: Published template
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OnboardingTemplate' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /onboarding/instances:
+    post:
+      tags: [Onboarding]
+      summary: Start onboarding for an employee from a template
+      operationId: createOnboardingInstance
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOnboardingInstance' }
+      responses:
+        '201':
+          description: Onboarding instance and tasks created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OnboardingInstance' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /onboarding/tasks/{taskId}:
+    patch:
+      tags: [Onboarding]
+      summary: Complete or reopen an onboarding task
+      operationId: updateOnboardingTask
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [completed, open] }
+                note: { type: string, maxLength: 2000 }
+      responses:
+        '200':
+          description: Updated task
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OnboardingTask' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /documents/upload-intents:
+    post:
+      tags: [Documents]
+      summary: Request a one-time private upload URL for a document
+      operationId: createDocumentUploadIntent
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateDocumentUploadIntent' }
+      responses:
+        '201':
+          description: Pending document and short-lived upload URL
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DocumentUploadIntent' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /documents:
+    get:
+      tags: [Documents]
+      summary: List document metadata for an employee
+      operationId: listDocuments
+      parameters:
+        - name: employeeId
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/Id' }
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Document metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Document' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /documents/{documentId}/complete:
+    post:
+      tags: [Documents]
+      summary: Complete document upload after the object store receives the blob
+      operationId: completeDocumentUpload
+      parameters:
+        - $ref: '#/components/parameters/DocumentId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [checksumSha256]
+              properties:
+                checksumSha256: { type: string, pattern: '^[a-fA-F0-9]{64}$' }
+      responses:
+        '200':
+          description: Document accepted for malware scan
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /documents/{documentId}/download-url:
+    get:
+      tags: [Documents]
+      summary: Request a short-lived download URL for a safe document
+      operationId: getDocumentDownloadUrl
+      parameters:
+        - $ref: '#/components/parameters/DocumentId'
+      responses:
+        '200':
+          description: Time-bound URL, issued after authorization and scan checks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url, expiresAt]
+                properties:
+                  url: { type: string, format: uri }
+                  expiresAt: { type: string, format: date-time }
+        default:
+          $ref: '#/components/responses/Problem'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Clerk-issued JWT verified by the EasyHR API.
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 16, maxLength: 255 }
+    EmployeeId:
+      name: employeeId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Id' }
+    LeaveRequestId:
+      name: requestId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Id' }
+    PunchId:
+      name: punchId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Id' }
+    TemplateId:
+      name: templateId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Id' }
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Id' }
+    DocumentId:
+      name: documentId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Id' }
+  responses:
+    Problem:
+      description: RFC 9457-style API problem
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    Id:
+      type: string
+      format: uuid
+    SessionContextResponse:
+      type: object
+      required: [userId, membershipId, organizationId, permissions]
+      properties:
+        userId: { $ref: '#/components/schemas/Id' }
+        membershipId: { $ref: '#/components/schemas/Id' }
+        organizationId: { $ref: '#/components/schemas/Id' }
+        permissions:
+          type: array
+          items: { type: string, example: 'employees:read' }
+    OrganizationSetupRequest:
+      type: object
+      required: [legalName, displayName, countryCode, timezone, currencyCode, subdomain, brandColor]
+      properties:
+        legalName: { type: string, minLength: 1, maxLength: 200 }
+        displayName: { type: string, minLength: 1, maxLength: 200 }
+        registrationNumber: { type: string, maxLength: 255 }
+        taxIdentifier: { type: string, maxLength: 255 }
+        countryCode: { type: string, enum: [UG, KE, RW, TZ, US, GB] }
+        timezone: { type: string, example: Africa/Kampala }
+        currencyCode: { type: string, pattern: '^[A-Z]{3}$', example: UGX }
+        industry: { type: string, maxLength: 160 }
+        companySizeBand: { type: string, maxLength: 80 }
+        websiteUrl: { type: string, format: uri }
+        contactEmail: { type: string, format: email }
+        contactPhone: { type: string, maxLength: 64 }
+        subdomain: { type: string, pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$' }
+        brandColor: { type: string, pattern: '^#[0-9A-Fa-f]{6}$' }
+        initialDepartments:
+          type: array
+          maxItems: 50
+          items: { type: string, minLength: 1, maxLength: 160 }
+        socialLinks:
+          type: object
+          additionalProperties: false
+          properties:
+            linkedin: { type: string, format: uri }
+            x: { type: string, format: uri }
+            facebook: { type: string, format: uri }
+            tiktok: { type: string, format: uri }
+            glassdoor: { type: string, format: uri }
+        headquarters:
+          type: object
+          properties:
+            name: { type: string, maxLength: 160 }
+            countryCode: { type: string, pattern: '^[A-Z]{2}$' }
+            timezone: { type: string }
+            geofence:
+              type: object
+              required: [latitude, longitude, radiusMeters, accuracyToleranceMeters]
+              properties:
+                latitude: { type: number, minimum: -90, maximum: 90 }
+                longitude: { type: number, minimum: -180, maximum: 180 }
+                radiusMeters: { type: integer, minimum: 10, maximum: 100000 }
+                accuracyToleranceMeters: { type: integer, minimum: 0, maximum: 1000 }
+    OrganizationSetupResponse:
+      type: object
+      required: [organizationId, workspaceId, membershipId, subdomain]
+      properties:
+        organizationId: { $ref: '#/components/schemas/Id' }
+        workspaceId: { $ref: '#/components/schemas/Id' }
+        membershipId: { $ref: '#/components/schemas/Id' }
+        subdomain: { type: string }
+    User:
+      type: object
+      required: [id, email, firstName, lastName]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        email: { type: string, format: email }
+        firstName: { type: string }
+        lastName: { type: string }
+    Organization:
+      type: object
+      required: [id, name, timezone, countryCode]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        name: { type: string }
+        timezone: { type: string, example: Africa/Kampala }
+        countryCode: { type: string, pattern: '^[A-Z]{2}$', example: UG }
+    Membership:
+      type: object
+      required: [id, roleKeys]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        roleKeys: { type: array, items: { type: string } }
+    EmployeeStatus:
+      type: string
+      enum: [active, onboarding, leave, suspended, terminated]
+    Department:
+      type: object
+      required: [id, name, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        name: { type: string }
+        code: { type: [string, 'null'] }
+        divisionId: { type: [string, 'null'], format: uuid }
+        parentDepartmentId: { type: [string, 'null'], format: uuid }
+        status: { type: string, enum: [active, archived] }
+    Division:
+      type: object
+      required: [id, name, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        name: { type: string }
+        code: { type: [string, 'null'] }
+        status: { type: string, enum: [active, archived] }
+    CreateDivisionRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 160 }
+        code: { type: string, maxLength: 80 }
+    CreateDepartmentRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 160 }
+        code: { type: string, maxLength: 80 }
+        divisionId: { type: string, format: uuid }
+        parentDepartmentId: { type: string, format: uuid }
+    Employee:
+      type: object
+      required: [id, firstName, lastName, workEmail, status, createdAt, updatedAt]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        firstName: { type: string }
+        lastName: { type: string }
+        workEmail: { type: string, format: email }
+        personalEmail: { type: [string, 'null'], format: email }
+        status: { $ref: '#/components/schemas/EmployeeStatus' }
+        departmentId: { type: [string, 'null'], format: uuid }
+        managerId: { type: [string, 'null'], format: uuid }
+        jobTitle: { type: [string, 'null'] }
+        startDate: { type: [string, 'null'], format: date }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CreateEmployeeRequest:
+      type: object
+      required: [employeeNumber, firstName, lastName, workEmail, hiredOn, employmentType, workerType, workArrangement, fteBasisPoints, payType, jobTitle]
+      properties:
+        employeeNumber: { type: string, minLength: 1, maxLength: 80 }
+        firstName: { type: string, minLength: 1, maxLength: 120 }
+        lastName: { type: string, minLength: 1, maxLength: 120 }
+        workEmail: { type: string, format: email }
+        personalEmail: { type: string, format: email }
+        departmentId: { $ref: '#/components/schemas/Id' }
+        managerId: { $ref: '#/components/schemas/Id' }
+        jobTitle: { type: string, maxLength: 160 }
+        hiredOn: { type: string, format: date }
+        employmentType: { type: string, enum: [full_time, part_time, fixed_term, contractor, intern] }
+        workerType: { type: string, enum: [employee, contractor] }
+        workArrangement: { type: string, enum: [on_site, hybrid, remote] }
+        fteBasisPoints: { type: integer, minimum: 1, maximum: 10000, example: 10000 }
+        payType: { type: string, enum: [salary, hourly] }
+        jobTitle: { type: string, minLength: 1, maxLength: 160 }
+        divisionId: { $ref: '#/components/schemas/Id' }
+        locationId: { $ref: '#/components/schemas/Id' }
+    CreateEmployeeResponse:
+      type: object
+      required: [id, firstName, lastName, workEmail, status, hiredOn]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        firstName: { type: string }
+        lastName: { type: string }
+        workEmail: { type: string, format: email }
+        status: { $ref: '#/components/schemas/EmployeeStatus' }
+        hiredOn: { type: string, format: date }
+    UpdateEmployeeRequest:
+      type: object
+      minProperties: 1
+      properties:
+        firstName: { type: string, minLength: 1, maxLength: 120 }
+        lastName: { type: string, minLength: 1, maxLength: 120 }
+        personalEmail: { type: [string, 'null'], format: email }
+        departmentId: { type: [string, 'null'], format: uuid }
+        managerId: { type: [string, 'null'], format: uuid }
+        jobTitle: { type: string, minLength: 1, maxLength: 160 }
+    EmployeePage:
+      type: object
+      required: [data, page]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/Employee' } }
+        page: { $ref: '#/components/schemas/CursorPage' }
+    CursorPage:
+      type: object
+      required: [limit, hasMore]
+      properties:
+        nextCursor: { type: [string, 'null'] }
+        limit: { type: integer }
+        hasMore: { type: boolean }
+    LeaveBalance:
+      type: object
+      required: [employeeId, leaveTypeId, availableMinutes, reservedMinutes, asOf]
+      properties:
+        employeeId: { $ref: '#/components/schemas/Id' }
+        leaveTypeId: { $ref: '#/components/schemas/Id' }
+        availableMinutes: { type: integer, minimum: 0 }
+        reservedMinutes: { type: integer, minimum: 0 }
+        asOf: { type: string, format: date-time }
+    LeaveRequestStatus:
+      type: string
+      enum: [pending_manager, pending_hr, approved, declined, cancelled]
+    LeaveRequest:
+      type: object
+      required: [id, employeeId, leaveTypeId, startDate, endDate, requestedMinutes, status, submittedAt]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        employeeId: { $ref: '#/components/schemas/Id' }
+        leaveTypeId: { $ref: '#/components/schemas/Id' }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        requestedMinutes: { type: integer, minimum: 1 }
+        reason: { type: [string, 'null'] }
+        status: { $ref: '#/components/schemas/LeaveRequestStatus' }
+        submittedAt: { type: string, format: date-time }
+        decidedAt: { type: [string, 'null'], format: date-time }
+    CreateLeaveRequest:
+      type: object
+      required: [leaveTypeId, startDate, endDate]
+      properties:
+        leaveTypeId: { $ref: '#/components/schemas/Id' }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        reason: { type: string, maxLength: 2000 }
+    LeaveRequestPage:
+      type: object
+      required: [data, page]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/LeaveRequest' } }
+        page: { $ref: '#/components/schemas/CursorPage' }
+    LeaveRequestDecision:
+      type: object
+      required: [id, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        status: { $ref: '#/components/schemas/LeaveRequestStatus' }
+    CreateAttendancePunch:
+      type: object
+      required: [kind, occurredAt, source]
+      properties:
+        employeeId:
+          description: Required only for an authorized kiosk/manager flow; ignored/rejected for self-service if it differs from the caller's employee identity.
+          allOf: [{ $ref: '#/components/schemas/Id' }]
+        kind: { type: string, enum: [clock_in, clock_out, break_start, break_end] }
+        occurredAt: { type: string, format: date-time }
+        source: { type: string, enum: [web, mobile, kiosk, manager_override] }
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+        deviceId: { type: string, maxLength: 255 }
+    AttendancePunch:
+      type: object
+      required: [id, employeeId, kind, occurredAt, source, policyOutcome, createdAt]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        employeeId: { $ref: '#/components/schemas/Id' }
+        kind: { type: string, enum: [clock_in, clock_out, break_start, break_end] }
+        occurredAt: { type: string, format: date-time }
+        source: { type: string }
+        policyOutcome: { type: string, enum: [not_evaluated, allowed, outside_geofence, needs_review] }
+        createdAt: { type: string, format: date-time }
+    AttendancePunchPage:
+      type: object
+      required: [data, page]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/AttendancePunch' } }
+        page: { $ref: '#/components/schemas/CursorPage' }
+    CreateAttendanceCorrection:
+      type: object
+      required: [occurredAt, reason]
+      properties:
+        occurredAt: { type: string, format: date-time }
+        reason: { type: string, minLength: 1, maxLength: 2000 }
+    LiveAttendance:
+      type: object
+      required: [employeeId, date, status]
+      properties:
+        employeeId: { $ref: '#/components/schemas/Id' }
+        date: { type: string, format: date }
+        status: { type: string, enum: [clocked_in, clocked_out, late, missing] }
+        clockInAt: { type: [string, 'null'], format: date-time }
+        clockOutAt: { type: [string, 'null'], format: date-time }
+        lateMinutes: { type: integer, minimum: 0 }
+    LiveAttendancePage:
+      type: object
+      required: [data, page]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/LiveAttendance' } }
+        page: { $ref: '#/components/schemas/CursorPage' }
+    OnboardingTemplate:
+      type: object
+      required: [id, name, version, status, taskCount]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        name: { type: string }
+        version: { type: integer, minimum: 1 }
+        status: { type: string, enum: [draft, published, archived] }
+        taskCount: { type: integer, minimum: 0 }
+    CreateOnboardingTemplate:
+      type: object
+      required: [name, tasks]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 160 }
+        tasks:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required: [title, category, assigneeType, dueOffsetDays, isRequired, sortOrder]
+            properties:
+              title: { type: string, minLength: 1, maxLength: 200 }
+              description: { type: string, maxLength: 4000 }
+              category: { type: string, enum: [it_setup, hr, facilities, training, documents, other] }
+              assigneeType: { type: string, enum: [employee, manager, hr_team, it_team, facilities_team] }
+              dueOffsetDays: { type: integer, minimum: -90, maximum: 365 }
+              isRequired: { type: boolean }
+              sortOrder: { type: integer, minimum: 0 }
+    CreateOnboardingInstance:
+      type: object
+      required: [employeeId, templateId, startDate]
+      properties:
+        employeeId: { $ref: '#/components/schemas/Id' }
+        templateId: { $ref: '#/components/schemas/Id' }
+        startDate: { type: string, format: date }
+    OnboardingInstance:
+      type: object
+      required: [id, employeeId, templateId, status, progressPercent, tasks]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        employeeId: { $ref: '#/components/schemas/Id' }
+        templateId: { $ref: '#/components/schemas/Id' }
+        status: { type: string, enum: [not_started, on_track, at_risk, completed] }
+        progressPercent: { type: integer, minimum: 0, maximum: 100 }
+        tasks: { type: array, items: { $ref: '#/components/schemas/OnboardingTask' } }
+    OnboardingTask:
+      type: object
+      required: [id, title, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        title: { type: string }
+        status: { type: string, enum: [open, completed] }
+        dueDate: { type: [string, 'null'], format: date }
+        completedAt: { type: [string, 'null'], format: date-time }
+    CreateDocumentUploadIntent:
+      type: object
+      required: [filename, contentType, sizeBytes, employeeId, category]
+      properties:
+        filename: { type: string, minLength: 1, maxLength: 255 }
+        contentType: { type: string, maxLength: 120 }
+        sizeBytes: { type: integer, minimum: 1, maximum: 52428800 }
+        employeeId: { $ref: '#/components/schemas/Id' }
+        category: { type: string, enum: [contract, identity, compliance, certification, other] }
+        expiresOn: { type: string, format: date }
+    DocumentUploadIntent:
+      type: object
+      required: [document, uploadUrl, expiresAt]
+      properties:
+        document: { $ref: '#/components/schemas/Document' }
+        uploadUrl: { type: string, format: uri }
+        expiresAt: { type: string, format: date-time }
+    Document:
+      type: object
+      required: [id, employeeId, filename, category, status, createdAt]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        employeeId: { $ref: '#/components/schemas/Id' }
+        filename: { type: string }
+        category: { type: string }
+        expiresOn: { type: [string, 'null'], format: date }
+        status: { type: string, enum: [pending_upload, pending_scan, available, quarantined, deleted] }
+        createdAt: { type: string, format: date-time }
+    Problem:
+      type: object
+      required: [type, title, status, code, requestId]
+      properties:
+        type: { type: string, format: uri, example: 'https://docs.easyhr.example/errors/forbidden' }
+        title: { type: string, example: Forbidden }
+        status: { type: integer, example: 403 }
+        code: { type: string, example: authorization.insufficient_scope }
+        detail: { type: string }
+        requestId: { type: string }
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, code]
+            properties:
+              field: { type: string }
+              code: { type: string }
+              message: { type: string }

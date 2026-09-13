@@ -1,0 +1,14 @@
+# Go
+bin/
+coverage.out
+*.test
+
+# Local environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS outbox_events;
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS idempotency_keys;
+DROP TABLE IF EXISTS membership_roles;
+DROP TABLE IF EXISTS role_permissions;
+DROP TABLE IF EXISTS permissions;
+DROP TABLE IF EXISTS roles;
+DROP TABLE IF EXISTS memberships;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS organizations;
