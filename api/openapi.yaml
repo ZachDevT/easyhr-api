@@ -895,6 +895,83 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
+  /employees/{employeeId}/goals:
+    get:
+      tags: [Performance]
+      summary: List performance goals for an employee
+      operationId: listGoals
+      parameters:
+        - $ref: '#/components/parameters/EmployeeId'
+      responses:
+        '200':
+          description: A list of goals
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PerformanceGoal' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Performance]
+      summary: Create a performance goal
+      operationId: createGoal
+      parameters:
+        - $ref: '#/components/parameters/EmployeeId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePerformanceGoal' }
+      responses:
+        '200':
+          description: The created goal
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PerformanceGoal' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /employees/{employeeId}/reviews:
+    post:
+      tags: [Performance]
+      summary: Submit a performance review
+      operationId: createReview
+      parameters:
+        - $ref: '#/components/parameters/EmployeeId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePerformanceReview' }
+      responses:
+        '200':
+          description: The created review
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PerformanceReview' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /employees/{employeeId}/feedback:
+    post:
+      tags: [Performance]
+      summary: Provide feedback for an employee
+      operationId: createFeedback
+      parameters:
+        - $ref: '#/components/parameters/EmployeeId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateFeedback' }
+      responses:
+        '200':
+          description: The created feedback
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FeedbackRecord' }
+        default:
+          $ref: '#/components/responses/Problem'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1134,6 +1211,61 @@ components:
       properties:
         baseAmountMinor: { type: integer, minimum: 0 }
         currency: { type: string, minLength: 3, maxLength: 3 }
+
+    PerformanceGoal:
+      type: object
+      required: [id, employeeId, title, status, completionPercentage]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        employeeId: { $ref: '#/components/schemas/Id' }
+        title: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [not_started, in_progress, achieved, missed] }
+        completionPercentage: { type: integer, minimum: 0, maximum: 100 }
+        dueDate: { type: [string, 'null'], format: date }
+    CreatePerformanceGoal:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 255 }
+        description: { type: string }
+        status: { type: string, enum: [not_started, in_progress, achieved, missed] }
+        completionPercentage: { type: integer, minimum: 0, maximum: 100 }
+        dueDate: { type: string, format: date }
+    PerformanceReview:
+      type: object
+      required: [id, employeeId, reviewerUserId, reviewCycle, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        employeeId: { $ref: '#/components/schemas/Id' }
+        reviewerUserId: { $ref: '#/components/schemas/Id' }
+        reviewCycle: { type: string }
+        status: { type: string, enum: [draft, submitted, acknowledged] }
+        overallScore: { type: [integer, 'null'] }
+        comments: { type: string }
+    CreatePerformanceReview:
+      type: object
+      required: [reviewCycle, status]
+      properties:
+        reviewCycle: { type: string, minLength: 1, maxLength: 120 }
+        status: { type: string, enum: [draft, submitted, acknowledged] }
+        overallScore: { type: integer, minimum: 1, maximum: 5 }
+        comments: { type: string }
+    FeedbackRecord:
+      type: object
+      required: [id, employeeId, providerUserId, content, visibility]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        employeeId: { $ref: '#/components/schemas/Id' }
+        providerUserId: { $ref: '#/components/schemas/Id' }
+        content: { type: string }
+        visibility: { type: string, enum: [public, manager_only, private] }
+    CreateFeedback:
+      type: object
+      required: [content, visibility]
+      properties:
+        content: { type: string, minLength: 1, maxLength: 5000 }
+        visibility: { type: string, enum: [public, manager_only, private] }
 
   responses:
     Problem:

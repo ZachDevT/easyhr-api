@@ -22,6 +22,7 @@ import (
 	"github.com/easyhr/easyhr-be/internal/onboarding"
 	"github.com/easyhr/easyhr-be/internal/payroll"
 	"github.com/easyhr/easyhr-be/internal/people"
+	"github.com/easyhr/easyhr-be/internal/performance"
 	"github.com/easyhr/easyhr-be/internal/relations"
 	"github.com/easyhr/easyhr-be/internal/signatures"
 	"github.com/easyhr/easyhr-be/internal/tenancy"
@@ -41,6 +42,7 @@ type Server struct {
 	signatures    *signatures.Service
 	relations     *relations.Service
 	hiring        *hiring.Service
+	performance   *performance.Service
 	attendance    *attendance.Service
 	onboarding    *onboarding.Service
 	documents     *documents.Service
@@ -72,7 +74,7 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 		MaxAge:           86400,
 	}))
 
-	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
+	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
 	if authentication != nil {
 		s.authenticated = e.Group("/api/v1")
 		s.authenticated.Use(adaptHTTPMiddleware(authentication))
@@ -1257,6 +1259,89 @@ func (s *Server) createJobOffer(c echo.Context) error {
 			return problem(c, http.StatusNotFound, "hiring.applicant_not_found", "Not found", "Applicant not found")
 		}
 		return problem(c, http.StatusInternalServerError, "hiring.create_offer_failed", "Internal server error", "Could not create job offer")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listPerformanceGoals(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("performance:read") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
+	}
+	result, err := s.performance.ListGoals(c.Request().Context(), principal.OrganizationID, c.Param("employeeId"))
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "performance.goals_failed", "Internal error", "Could not fetch goals")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createPerformanceGoal(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("performance:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
+	}
+	var input performance.CreateGoalInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	result, err := s.performance.CreateGoal(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Param("employeeId"), input)
+	if err != nil {
+		if errors.Is(err, performance.ErrNotFound) {
+			return problem(c, http.StatusNotFound, "performance.not_found", "Not found", "Employee not found")
+		}
+		return problem(c, http.StatusInternalServerError, "performance.create_failed", "Internal error", "Could not create")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createPerformanceReview(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("performance:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
+	}
+	var input performance.CreateReviewInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	result, err := s.performance.CreateReview(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Param("employeeId"), input)
+	if err != nil {
+		if errors.Is(err, performance.ErrNotFound) {
+			return problem(c, http.StatusNotFound, "performance.not_found", "Not found", "Employee not found")
+		}
+		return problem(c, http.StatusInternalServerError, "performance.create_failed", "Internal error", "Could not create")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createFeedbackRecord(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	// Assuming general access can create feedback (like peers)
+	var input performance.CreateFeedbackInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	result, err := s.performance.CreateFeedback(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Param("employeeId"), input)
+	if err != nil {
+		if errors.Is(err, performance.ErrNotFound) {
+			return problem(c, http.StatusNotFound, "performance.not_found", "Not found", "Employee not found")
+		}
+		return problem(c, http.StatusInternalServerError, "performance.create_failed", "Internal error", "Could not create")
 	}
 	return c.JSON(http.StatusOK, result)
 }
