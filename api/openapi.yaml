@@ -1637,6 +1637,109 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
+  /data/jobs:
+    post:
+      tags: [Operations]
+      summary: Create a data import/export job for the tenant
+      operationId: createTenantDataJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateDataJob' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DataJob' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /features:
+    get:
+      tags: [Operations]
+      summary: List all active feature flags for the tenant
+      operationId: listTenantFeatures
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/FeatureFlagResult' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /platform/data/jobs:
+    get:
+      tags: [Platform]
+      summary: List all tenant data jobs across the platform
+      operationId: listPlatformDataJobs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DataJob' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /platform/compliance/requests:
+    get:
+      tags: [Platform]
+      summary: List all GDPR/Compliance requests across the platform
+      operationId: listComplianceRequests
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ComplianceRequest' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /platform/features:
+    get:
+      tags: [Platform]
+      summary: List all platform feature flags
+      operationId: listPlatformFeatures
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/FeatureFlag' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /platform/features/{key}/tenants/{orgId}:
+    put:
+      tags: [Platform]
+      summary: Set a feature flag override for a specific tenant
+      operationId: setTenantFeatureOverride
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+        - name: orgId
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetFeatureOverride' }
+      responses:
+        '200':
+          description: OK
+        default:
+          $ref: '#/components/responses/Problem'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2302,6 +2405,52 @@ components:
         priority: { type: string }
         status: { type: string }
         assignedToOperatorId: { $ref: '#/components/schemas/Id' }
+
+    DataJob:
+      type: object
+      required: [id, organizationId, jobType, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        organizationId: { $ref: '#/components/schemas/Id' }
+        jobType: { type: string }
+        status: { type: string }
+        fileUrl: { type: string }
+        requestedByUserId: { $ref: '#/components/schemas/Id' }
+    CreateDataJob:
+      type: object
+      required: [jobType]
+      properties:
+        jobType: { type: string, enum: [import_employees, import_payroll, export_full] }
+        fileUrl: { type: string }
+    ComplianceRequest:
+      type: object
+      required: [id, organizationId, requestType, subjectEmail, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        organizationId: { $ref: '#/components/schemas/Id' }
+        requestType: { type: string, enum: [deletion, export] }
+        subjectEmail: { type: string }
+        status: { type: string }
+        resolutionNotes: { type: string }
+    FeatureFlag:
+      type: object
+      required: [id, key, defaultEnabled]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        key: { type: string }
+        description: { type: string }
+        defaultEnabled: { type: boolean }
+    FeatureFlagResult:
+      type: object
+      required: [key, enabled]
+      properties:
+        key: { type: string }
+        enabled: { type: boolean }
+    SetFeatureOverride:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
 
   responses:
     Problem:

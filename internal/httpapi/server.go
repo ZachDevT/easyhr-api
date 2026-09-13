@@ -23,6 +23,7 @@ import (
 	"github.com/easyhr/easyhr-be/internal/identity"
 	"github.com/easyhr/easyhr-be/internal/offboarding"
 	"github.com/easyhr/easyhr-be/internal/onboarding"
+	"github.com/easyhr/easyhr-be/internal/operations"
 	"github.com/easyhr/easyhr-be/internal/payroll"
 	"github.com/easyhr/easyhr-be/internal/people"
 	"github.com/easyhr/easyhr-be/internal/performance"
@@ -61,6 +62,7 @@ type Server struct {
 	policies      *policies.Service
 	platform      *platform.Service
 	support       *support.Service
+	operations    *operations.Service
 	attendance    *attendance.Service
 	onboarding    *onboarding.Service
 	documents     *documents.Service
@@ -92,7 +94,7 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 		MaxAge:           86400,
 	}))
 
-	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
+	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), operations: operations.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
 	if authentication != nil {
 		s.authenticated = e.Group("/api/v1")
 		s.authenticated.Use(adaptHTTPMiddleware(authentication))
@@ -2059,6 +2061,102 @@ func (s *Server) addPlatformTicketMessage(c echo.Context) error {
 	}
 	if err := s.support.AddPlatformMessage(c.Request().Context(), principal.OperatorID, c.Param("id"), input); err != nil {
 		return problem(c, http.StatusInternalServerError, "support.reply_failed", "Internal error", "Could not reply")
+	}
+	return c.NoContent(http.StatusOK)
+}
+
+// Tenant Operations
+func (s *Server) createTenantDataJob(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("settings:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
+	}
+
+	var input operations.CreateDataJobInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	result, err := s.operations.CreateTenantDataJob(c.Request().Context(), principal.OrganizationID, principal.UserID, input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "operations.create_failed", "Internal error", "Could not create data job")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listTenantFeatures(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.operations.ListTenantFeatures(c.Request().Context(), principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "operations.list_failed", "Internal error", "Could not fetch features")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+// Platform Operations
+func (s *Server) listPlatformDataJobs(c echo.Context) error {
+	_, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.operations.ListPlatformDataJobs(c.Request().Context())
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "operations.list_failed", "Internal error", "Could not fetch platform data jobs")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listComplianceRequests(c echo.Context) error {
+	_, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.operations.ListPlatformComplianceRequests(c.Request().Context())
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "operations.list_failed", "Internal error", "Could not fetch compliance requests")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listPlatformFeatures(c echo.Context) error {
+	_, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.operations.ListPlatformFeatures(c.Request().Context())
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "operations.list_failed", "Internal error", "Could not fetch platform features")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) setTenantFeatureOverride(c echo.Context) error {
+	principal, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	hasPerm, err := s.platform.HasPermission(c.Request().Context(), principal.OperatorID, "platform:super_admin")
+	if err != nil || !hasPerm {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "Only Super Admins can override features")
+	}
+
+	var input operations.SetFeatureOverrideInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	if err := s.operations.SetTenantFeatureOverride(c.Request().Context(), principal.OperatorID, c.Param("key"), c.Param("orgId"), input); err != nil {
+		return problem(c, http.StatusInternalServerError, "operations.update_failed", "Internal error", "Could not set feature override")
 	}
 	return c.NoContent(http.StatusOK)
 }
