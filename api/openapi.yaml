@@ -1534,6 +1534,109 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
+  /public/contact:
+    post:
+      tags: [Public]
+      summary: Submit a public contact form inquiry
+      operationId: submitPublicContact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PublicContactRequest' }
+      responses:
+        '200':
+          description: OK
+        default:
+          $ref: '#/components/responses/Problem'
+  /support/tickets:
+    get:
+      tags: [Support]
+      summary: List tenant support tickets (HR Helpdesk)
+      operationId: listTenantTickets
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TenantTicket' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Support]
+      summary: Create a tenant support ticket
+      operationId: createTenantTicket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTenantTicket' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TenantTicket' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /support/tickets/{id}/messages:
+    post:
+      tags: [Support]
+      summary: Add a message to a tenant ticket
+      operationId: addTenantTicketMessage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTicketMessage' }
+      responses:
+        '200':
+          description: OK
+        default:
+          $ref: '#/components/responses/Problem'
+  /platform/support/tickets:
+    get:
+      tags: [Platform]
+      summary: List platform support tickets
+      operationId: listPlatformTickets
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PlatformTicket' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /platform/support/tickets/{id}/messages:
+    post:
+      tags: [Platform]
+      summary: Reply to a platform support ticket as an operator
+      operationId: addPlatformTicketMessage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTicketMessage' }
+      responses:
+        '200':
+          description: OK
+        default:
+          $ref: '#/components/responses/Problem'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2157,6 +2260,48 @@ components:
         amountMinor: { type: integer }
         status: { type: string }
         settledAt: { type: string, format: date-time }
+
+    PublicContactRequest:
+      type: object
+      required: [email, subject, message]
+      properties:
+        email: { type: string, format: email }
+        subject: { type: string }
+        message: { type: string }
+    TenantTicket:
+      type: object
+      required: [id, organizationId, employeeId, subject, priority, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        organizationId: { $ref: '#/components/schemas/Id' }
+        employeeId: { $ref: '#/components/schemas/Id' }
+        subject: { type: string }
+        priority: { type: string }
+        status: { type: string }
+        assignedToEmployeeId: { $ref: '#/components/schemas/Id' }
+    CreateTenantTicket:
+      type: object
+      required: [subject, message, priority]
+      properties:
+        subject: { type: string }
+        message: { type: string }
+        priority: { type: string, enum: [low, normal, high, urgent] }
+    CreateTicketMessage:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+    PlatformTicket:
+      type: object
+      required: [id, subject, priority, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        organizationId: { $ref: '#/components/schemas/Id' }
+        contactEmail: { type: string }
+        subject: { type: string }
+        priority: { type: string }
+        status: { type: string }
+        assignedToOperatorId: { $ref: '#/components/schemas/Id' }
 
   responses:
     Problem:

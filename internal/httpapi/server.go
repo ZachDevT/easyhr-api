@@ -32,6 +32,7 @@ import (
 	"github.com/easyhr/easyhr-be/internal/relations"
 	"github.com/easyhr/easyhr-be/internal/scheduling"
 	"github.com/easyhr/easyhr-be/internal/signatures"
+	"github.com/easyhr/easyhr-be/internal/support"
 	"github.com/easyhr/easyhr-be/internal/tenancy"
 	"github.com/easyhr/easyhr-be/internal/timeoff"
 	"github.com/easyhr/easyhr-be/internal/workflows"
@@ -59,6 +60,7 @@ type Server struct {
 	offboarding   *offboarding.Service
 	policies      *policies.Service
 	platform      *platform.Service
+	support       *support.Service
 	attendance    *attendance.Service
 	onboarding    *onboarding.Service
 	documents     *documents.Service
@@ -90,7 +92,7 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 		MaxAge:           86400,
 	}))
 
-	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
+	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
 	if authentication != nil {
 		s.authenticated = e.Group("/api/v1")
 		s.authenticated.Use(adaptHTTPMiddleware(authentication))
@@ -134,6 +136,9 @@ func adaptHTTPMiddleware(wrap auth.Middleware) echo.MiddlewareFunc {
 func (s *Server) Handler() http.Handler { return s.echo }
 
 func (s *Server) registerRoutes() {
+	// Public Routes
+	s.echo.POST("/api/v1/public/contact", s.submitPublicContact)
+
 	s.echo.GET("/healthz", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -1940,4 +1945,120 @@ func (s *Server) recordInvoicePayment(c echo.Context) error {
 		return problem(c, http.StatusInternalServerError, "billing.payment_failed", "Internal error", "Could not record payment")
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+// Public Contact
+func (s *Server) submitPublicContact(c echo.Context) error {
+	var input support.PublicContactInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	if err := s.support.SubmitPublicContact(c.Request().Context(), input); err != nil {
+		return problem(c, http.StatusInternalServerError, "support.contact_failed", "Internal error", "Could not submit contact form")
+	}
+	return c.NoContent(http.StatusOK)
+}
+
+// Tenant Support
+func (s *Server) listTenantTickets(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.support.ListTenantTickets(c.Request().Context(), principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "support.list_failed", "Internal error", "Could not fetch tickets")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createTenantTicket(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	var input support.CreateTenantTicketInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	// Assuming the principal has an employee record bound to them.
+	// For MVP, we will assume EmployeeID is UserID (since we decoupled it earlier, we should really lookup the EmployeeID for the UserID).
+	// To keep it simple, we pass UserID and assume the tenant.go handles the relationship, or it fails FK.
+	// Actually we should look up employee_id. Let's assume EmployeeID is present or we just use UserID for now.
+	// Wait, earlier we used employeeID as param. The user who is logged in acts as an employee.
+	// Let's query their employee ID.
+	var empID string
+	err := s.pool.QueryRow(c.Request().Context(), "SELECT id::text FROM employees WHERE user_id = $1 AND organization_id = $2", principal.UserID, principal.OrganizationID).Scan(&empID)
+	if err != nil {
+		return problem(c, http.StatusForbidden, "support.no_employee", "Forbidden", "Must be an employee to create tickets")
+	}
+
+	result, err := s.support.CreateTenantTicket(c.Request().Context(), principal.OrganizationID, empID, input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "support.create_failed", "Internal error", err.Error())
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) addTenantTicketMessage(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	var empID string
+	err := s.pool.QueryRow(c.Request().Context(), "SELECT id::text FROM employees WHERE user_id = $1 AND organization_id = $2", principal.UserID, principal.OrganizationID).Scan(&empID)
+	if err != nil {
+		return problem(c, http.StatusForbidden, "support.no_employee", "Forbidden", "Must be an employee to reply")
+	}
+
+	var input support.CreateTicketMessageInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+
+	if err := s.support.AddTenantMessage(c.Request().Context(), principal.OrganizationID, empID, c.Param("id"), input); err != nil {
+		return problem(c, http.StatusInternalServerError, "support.reply_failed", "Internal error", "Could not reply")
+	}
+	return c.NoContent(http.StatusOK)
+}
+
+// Platform Support
+func (s *Server) listPlatformTickets(c echo.Context) error {
+	_, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.support.ListPlatformTickets(c.Request().Context())
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "support.list_failed", "Internal error", "Could not fetch platform tickets")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) addPlatformTicketMessage(c echo.Context) error {
+	principal, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	hasPerm, err := s.platform.HasPermission(c.Request().Context(), principal.OperatorID, "platform:support")
+	if err != nil || !hasPerm {
+		hasGod, _ := s.platform.HasPermission(c.Request().Context(), principal.OperatorID, "platform:super_admin")
+		if !hasGod {
+			return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No support permission")
+		}
+	}
+
+	var input support.CreateTicketMessageInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	if err := s.support.AddPlatformMessage(c.Request().Context(), principal.OperatorID, c.Param("id"), input); err != nil {
+		return problem(c, http.StatusInternalServerError, "support.reply_failed", "Internal error", "Could not reply")
+	}
+	return c.NoContent(http.StatusOK)
 }
