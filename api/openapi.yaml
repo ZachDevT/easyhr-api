@@ -713,6 +713,42 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
+  /documents/{documentId}/signature-requests:
+    post:
+      tags: [Signatures]
+      summary: Send a document for electronic signature
+      operationId: createSignatureRequest
+      parameters:
+        - $ref: '#/components/parameters/DocumentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSignatureRequest' }
+      responses:
+        '200':
+          description: The created signature request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SignatureRequest' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /signature-requests:
+    get:
+      tags: [Signatures]
+      summary: List signature requests
+      operationId: listSignatureRequests
+      responses:
+        '200':
+          description: A list of signature requests
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SignatureRequest' }
+        default:
+          $ref: '#/components/responses/Problem'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -807,6 +843,35 @@ components:
         payrollPeriodId: { $ref: '#/components/schemas/Id' }
         status: { type: string, enum: [draft, calculated, approved] }
         approvedAt: { type: [string, 'null'], format: date-time }
+
+    SignatureRecipient:
+      type: object
+      required: [id, email, name, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        email: { type: string, format: email }
+        name: { type: string }
+        status: { type: string, enum: [created, sent, delivered, completed, declined] }
+    SignatureRequest:
+      type: object
+      required: [id, documentId, status, recipients]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        documentId: { $ref: '#/components/schemas/Id' }
+        status: { type: string, enum: [draft, sent, delivered, completed, declined, voided] }
+        recipients: { type: array, items: { $ref: '#/components/schemas/SignatureRecipient' } }
+    CreateSignatureRecipient:
+      type: object
+      required: [email, name]
+      properties:
+        email: { type: string, format: email }
+        name: { type: string }
+    CreateSignatureRequest:
+      type: object
+      required: [recipients]
+      properties:
+        message: { type: string }
+        recipients: { type: array, items: { $ref: '#/components/schemas/CreateSignatureRecipient' } }
 
   responses:
     Problem:

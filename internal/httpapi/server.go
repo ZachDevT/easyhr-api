@@ -21,6 +21,7 @@ import (
 	"github.com/easyhr/easyhr-be/internal/onboarding"
 	"github.com/easyhr/easyhr-be/internal/payroll"
 	"github.com/easyhr/easyhr-be/internal/people"
+	"github.com/easyhr/easyhr-be/internal/signatures"
 	"github.com/easyhr/easyhr-be/internal/tenancy"
 	"github.com/easyhr/easyhr-be/internal/timeoff"
 )
@@ -35,6 +36,7 @@ type Server struct {
 	people        *people.Directory
 	timeOff       *timeoff.Service
 	payroll       *payroll.Service
+	signatures    *signatures.Service
 	attendance    *attendance.Service
 	onboarding    *onboarding.Service
 	documents     *documents.Service
@@ -66,7 +68,7 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 		MaxAge:           86400,
 	}))
 
-	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
+	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
 	if authentication != nil {
 		s.authenticated = e.Group("/api/v1")
 		s.authenticated.Use(adaptHTTPMiddleware(authentication))
@@ -1070,4 +1072,39 @@ func (s *Server) lockPayrollRun(c echo.Context) error {
 		return problem(c, http.StatusInternalServerError, "payroll.lock_failed", "Internal server error", "Could not lock payroll run")
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *Server) createSignatureRequest(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("signatures:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage signatures")
+	}
+	var input signatures.CreateSignatureRequestInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request", err.Error())
+	}
+	result, err := s.signatures.CreateRequest(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Param("documentId"), input)
+	if err != nil {
+		if errors.Is(err, signatures.ErrNotFound) {
+			return problem(c, http.StatusNotFound, "signatures.document_not_found", "Not found", "Document not found or unavailable")
+		}
+		return problem(c, http.StatusInternalServerError, "signatures.create_failed", "Internal server error", "Could not dispatch signature request")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) handleDocuSignWebhook(c echo.Context) error {
+	// In production, HMAC validation would occur here based on the headers
+	var event signatures.WebhookEvent
+	if err := c.Bind(&event); err != nil {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	if err := s.signatures.ProcessWebhook(c.Request().Context(), event); err != nil {
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	return c.NoContent(http.StatusOK)
 }
