@@ -802,6 +802,99 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
+  /public/jobs:
+    get:
+      tags: [Hiring Public]
+      summary: List published job postings (Public)
+      operationId: listPublicJobs
+      parameters:
+        - name: organizationId
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/Id' }
+      responses:
+        '200':
+          description: A list of published job postings
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/JobPosting' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /public/jobs/{postingId}/apply:
+    post:
+      tags: [Hiring Public]
+      summary: Submit a job application (Public)
+      operationId: applyForJob
+      parameters:
+        - $ref: '#/components/parameters/PostingId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApplyForJob' }
+      responses:
+        '200':
+          description: Application submitted successfully
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobApplicant' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /hiring/postings:
+    get:
+      tags: [Hiring]
+      summary: List all job postings
+      operationId: listJobPostings
+      responses:
+        '200':
+          description: A list of job postings
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/JobPosting' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Hiring]
+      summary: Create a job posting
+      operationId: createJobPosting
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateJobPosting' }
+      responses:
+        '200':
+          description: The created job posting
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobPosting' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /hiring/applicants/{applicantId}/offers:
+    post:
+      tags: [Hiring]
+      summary: Create a job offer for an applicant
+      operationId: createJobOffer
+      parameters:
+        - $ref: '#/components/parameters/ApplicantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateJobOffer' }
+      responses:
+        '200':
+          description: The created job offer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobOffer' }
+        default:
+          $ref: '#/components/responses/Problem'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -838,6 +931,17 @@ components:
       in: path
       required: true
       schema: { $ref: '#/components/schemas/Id' }
+    PostingId:
+      name: postingId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Id' }
+    ApplicantId:
+      name: applicantId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Id' }
+
     CaseId:
       name: caseId
       in: path
@@ -972,6 +1076,64 @@ components:
         paidSuspension: { type: boolean }
         severanceDetails: { type: string }
         reason: { type: string, minLength: 1, maxLength: 5000 }
+
+    JobPosting:
+      type: object
+      required: [id, title, description, location, employmentType, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        title: { type: string }
+        description: { type: string }
+        location: { type: string }
+        employmentType: { type: string, enum: [full_time, part_time, contract, internship] }
+        status: { type: string, enum: [draft, published, closed] }
+    CreateJobPosting:
+      type: object
+      required: [title, description, location, employmentType, status]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 255 }
+        description: { type: string }
+        location: { type: string }
+        employmentType: { type: string, enum: [full_time, part_time, contract, internship] }
+        status: { type: string, enum: [draft, published, closed] }
+    JobApplicant:
+      type: object
+      required: [id, jobId, firstName, lastName, email, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        jobId: { $ref: '#/components/schemas/Id' }
+        firstName: { type: string }
+        lastName: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string }
+        resumeDocumentId: { $ref: '#/components/schemas/Id' }
+        status: { type: string, enum: [new, screening, interviewing, offered, hired, rejected] }
+    ApplyForJob:
+      type: object
+      required: [firstName, lastName, email]
+      properties:
+        firstName: { type: string }
+        lastName: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string }
+        resumeDocumentId: { $ref: '#/components/schemas/Id' }
+    JobOffer:
+      type: object
+      required: [id, applicantId, baseAmountMinor, currency, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        applicantId: { $ref: '#/components/schemas/Id' }
+        baseAmountMinor: { type: integer }
+        currency: { type: string }
+        documentId: { $ref: '#/components/schemas/Id' }
+        signatureRequestId: { $ref: '#/components/schemas/Id' }
+        status: { type: string, enum: [draft, sent, accepted, declined] }
+    CreateJobOffer:
+      type: object
+      required: [baseAmountMinor, currency]
+      properties:
+        baseAmountMinor: { type: integer, minimum: 0 }
+        currency: { type: string, minLength: 3, maxLength: 3 }
 
   responses:
     Problem:
