@@ -1329,6 +1329,75 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
+  /platform/auth/login:
+    post:
+      tags: [Platform]
+      summary: Login for backoffice platform operators
+      operationId: platformLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformAuthToken' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /platform/operators:
+    get:
+      tags: [Platform]
+      summary: List platform operators
+      operationId: listPlatformOperators
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PlatformOperator' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Platform]
+      summary: Create a platform operator
+      operationId: createPlatformOperator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePlatformOperator' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformOperator' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /platform/support-sessions:
+    post:
+      tags: [Platform]
+      summary: Request a temporary support session for a tenant
+      operationId: createSupportSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSupportSession' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupportSession' }
+        default:
+          $ref: '#/components/responses/Problem'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1839,6 +1908,43 @@ components:
         title: { type: string, minLength: 1, maxLength: 255 }
         category: { type: string }
         requiresSignature: { type: boolean }
+
+    PlatformAuthToken:
+      type: object
+      required: [token, expiresAt]
+      properties:
+        token: { type: string }
+        expiresAt: { type: string, format: date-time }
+    PlatformOperator:
+      type: object
+      required: [id, email, status, mfaEnabled]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        email: { type: string, format: email }
+        status: { type: string, enum: [active, suspended] }
+        mfaEnabled: { type: boolean }
+    CreatePlatformOperator:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8 }
+    SupportSession:
+      type: object
+      required: [id, operatorId, organizationId, reason, status, expiresAt]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        operatorId: { $ref: '#/components/schemas/Id' }
+        organizationId: { $ref: '#/components/schemas/Id' }
+        reason: { type: string }
+        status: { type: string, enum: [active, expired] }
+        expiresAt: { type: string, format: date-time }
+    CreateSupportSession:
+      type: object
+      required: [organizationId, reason]
+      properties:
+        organizationId: { $ref: '#/components/schemas/Id' }
+        reason: { type: string, minLength: 5 }
 
   responses:
     Problem:

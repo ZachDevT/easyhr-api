@@ -26,6 +26,7 @@ import (
 	"github.com/easyhr/easyhr-be/internal/payroll"
 	"github.com/easyhr/easyhr-be/internal/people"
 	"github.com/easyhr/easyhr-be/internal/performance"
+	"github.com/easyhr/easyhr-be/internal/platform"
 	"github.com/easyhr/easyhr-be/internal/policies"
 	"github.com/easyhr/easyhr-be/internal/promotions"
 	"github.com/easyhr/easyhr-be/internal/relations"
@@ -57,6 +58,7 @@ type Server struct {
 	holidays      *holidays.Service
 	offboarding   *offboarding.Service
 	policies      *policies.Service
+	platform      *platform.Service
 	attendance    *attendance.Service
 	onboarding    *onboarding.Service
 	documents     *documents.Service
@@ -88,7 +90,7 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 		MaxAge:           86400,
 	}))
 
-	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
+	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
 	if authentication != nil {
 		s.authenticated = e.Group("/api/v1")
 		s.authenticated.Use(adaptHTTPMiddleware(authentication))
@@ -1727,6 +1729,79 @@ func (s *Server) createPolicy(c echo.Context) error {
 	result, err := s.policies.CreatePolicy(c.Request().Context(), principal.OrganizationID, principal.UserID, input)
 	if err != nil {
 		return problem(c, http.StatusInternalServerError, "policies.create_failed", "Internal error", "Could not create policy")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) platformLogin(c echo.Context) error {
+	var input platform.LoginInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request", err.Error())
+	}
+	result, err := s.platform.Login(c.Request().Context(), input)
+	if err != nil {
+		return problem(c, http.StatusUnauthorized, "auth.invalid_credentials", "Unauthorized", "Invalid credentials")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listPlatformOperators(c echo.Context) error {
+	_, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.platform.ListOperators(c.Request().Context())
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "platform.list_failed", "Internal error", "Could not fetch operators")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createPlatformOperator(c echo.Context) error {
+	principal, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	hasPerm, err := s.platform.HasPermission(c.Request().Context(), principal.OperatorID, "platform:super_admin")
+	if err != nil || !hasPerm {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "Only Super Admins can create operators")
+	}
+
+	var input platform.CreateOperatorInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	result, err := s.platform.CreateOperator(c.Request().Context(), input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "platform.create_failed", "Internal error", "Could not create operator")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createSupportSession(c echo.Context) error {
+	principal, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	hasPerm, err := s.platform.HasPermission(c.Request().Context(), principal.OperatorID, "platform:support")
+	if err != nil || !hasPerm {
+		// Even without explicit support perm, a super admin can do it
+		hasGod, _ := s.platform.HasPermission(c.Request().Context(), principal.OperatorID, "platform:super_admin")
+		if !hasGod {
+			return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No support permission")
+		}
+	}
+
+	var input platform.CreateSupportSessionInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	result, err := s.platform.CreateSupportSession(c.Request().Context(), principal.OperatorID, input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "platform.create_failed", "Internal error", "Could not create support session")
 	}
 	return c.JSON(http.StatusOK, result)
 }
