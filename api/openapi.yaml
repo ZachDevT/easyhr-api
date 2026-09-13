@@ -1126,6 +1126,43 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
+  /employees/{employeeId}/promotions:
+    get:
+      tags: [Promotions]
+      summary: List promotion events for an employee
+      operationId: listPromotions
+      parameters:
+        - $ref: '#/components/parameters/EmployeeId'
+      responses:
+        '200':
+          description: A list of promotion events
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PromotionEvent' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Promotions]
+      summary: Execute a promotion for an employee
+      operationId: executePromotion
+      parameters:
+        - $ref: '#/components/parameters/EmployeeId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExecutePromotion' }
+      responses:
+        '200':
+          description: The executed promotion event
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PromotionEvent' }
+        default:
+          $ref: '#/components/responses/Problem'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1510,6 +1547,31 @@ components:
         periodStart: { type: string, format: date }
         periodEnd: { type: string, format: date }
         documentId: { $ref: '#/components/schemas/Id' }
+
+    PromotionEvent:
+      type: object
+      required: [id, employeeId, effectiveDate, newJobTitle, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        employeeId: { $ref: '#/components/schemas/Id' }
+        effectiveDate: { type: string, format: date }
+        previousJobTitle: { type: string }
+        newJobTitle: { type: string }
+        previousManagerId: { $ref: '#/components/schemas/Id' }
+        newManagerId: { $ref: '#/components/schemas/Id' }
+        previousCompensationMinor: { type: integer }
+        newCompensationMinor: { type: integer }
+        rationale: { type: string }
+        status: { type: string, enum: [executed, cancelled] }
+    ExecutePromotion:
+      type: object
+      required: [effectiveDate, newJobTitle]
+      properties:
+        effectiveDate: { type: string, format: date }
+        newJobTitle: { type: string, minLength: 1, maxLength: 160 }
+        newManagerId: { $ref: '#/components/schemas/Id' }
+        newCompensationMinor: { type: integer, minimum: 0 }
+        rationale: { type: string }
 
   responses:
     Problem:
