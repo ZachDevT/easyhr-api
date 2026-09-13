@@ -749,6 +749,59 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
+  /employee-relations/cases:
+    post:
+      tags: [Employee Relations]
+      summary: Create a new relation case
+      operationId: createRelationCase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRelationCase' }
+      responses:
+        '200':
+          description: The created case
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RelationCase' }
+        default:
+          $ref: '#/components/responses/Problem'
+    get:
+      tags: [Employee Relations]
+      summary: List relation cases
+      operationId: listRelationCases
+      responses:
+        '200':
+          description: A list of relation cases
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/RelationCase' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /employee-relations/cases/{caseId}/actions:
+    post:
+      tags: [Employee Relations]
+      summary: Execute a disciplinary action on a case
+      operationId: executeRelationAction
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRelationAction' }
+      responses:
+        '200':
+          description: The executed action
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RelationAction' }
+        default:
+          $ref: '#/components/responses/Problem'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -785,6 +838,12 @@ components:
       in: path
       required: true
       schema: { $ref: '#/components/schemas/Id' }
+    CaseId:
+      name: caseId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Id' }
+
     RunId:
       name: runId
       in: path
@@ -872,6 +931,47 @@ components:
       properties:
         message: { type: string }
         recipients: { type: array, items: { $ref: '#/components/schemas/CreateSignatureRecipient' } }
+
+    RelationCase:
+      type: object
+      required: [id, employeeId, category, severity, status, title]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        employeeId: { $ref: '#/components/schemas/Id' }
+        category: { type: string, enum: [attendance, conduct, performance, policy_violation, other] }
+        severity: { type: string, enum: [low, medium, high, critical] }
+        status: { type: string, enum: [open, under_review, closed] }
+        title: { type: string }
+        description: { type: string }
+    CreateRelationCase:
+      type: object
+      required: [employeeId, category, severity, title]
+      properties:
+        employeeId: { $ref: '#/components/schemas/Id' }
+        category: { type: string, enum: [attendance, conduct, performance, policy_violation, other] }
+        severity: { type: string, enum: [low, medium, high, critical] }
+        title: { type: string, minLength: 1, maxLength: 255 }
+        description: { type: string }
+    RelationAction:
+      type: object
+      required: [id, caseId, actionType, effectiveDate, reason]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        caseId: { $ref: '#/components/schemas/Id' }
+        actionType: { type: string, enum: [warning, suspension, termination, note] }
+        effectiveDate: { type: string, format: date }
+        paidSuspension: { type: boolean }
+        severanceDetails: { type: string }
+        reason: { type: string }
+    CreateRelationAction:
+      type: object
+      required: [actionType, effectiveDate, reason]
+      properties:
+        actionType: { type: string, enum: [warning, suspension, termination, note] }
+        effectiveDate: { type: string, format: date }
+        paidSuspension: { type: boolean }
+        severanceDetails: { type: string }
+        reason: { type: string, minLength: 1, maxLength: 5000 }
 
   responses:
     Problem:
