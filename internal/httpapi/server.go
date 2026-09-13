@@ -1805,3 +1805,139 @@ func (s *Server) createSupportSession(c echo.Context) error {
 	}
 	return c.JSON(http.StatusOK, result)
 }
+
+func (s *Server) listPlatformPlans(c echo.Context) error {
+	_, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.platform.ListPlans(c.Request().Context())
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "billing.list_failed", "Internal error", "Could not fetch plans")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listSettlementMethods(c echo.Context) error {
+	_, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.platform.ListSettlementMethods(c.Request().Context())
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "billing.list_failed", "Internal error", "Could not fetch settlement methods")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createSettlementMethod(c echo.Context) error {
+	principal, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	hasPerm, err := s.platform.HasPermission(c.Request().Context(), principal.OperatorID, "platform:manage_billing")
+	if err != nil || !hasPerm {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No billing permission")
+	}
+
+	var input platform.CreateSettlementMethodInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	result, err := s.platform.CreateSettlementMethod(c.Request().Context(), input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "billing.create_failed", "Internal error", "Could not create settlement method")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listTenantSubscriptions(c echo.Context) error {
+	_, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.platform.ListSubscriptions(c.Request().Context())
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "billing.list_failed", "Internal error", "Could not fetch subscriptions")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createTenantSubscription(c echo.Context) error {
+	principal, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	hasPerm, err := s.platform.HasPermission(c.Request().Context(), principal.OperatorID, "platform:manage_billing")
+	if err != nil || !hasPerm {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No billing permission")
+	}
+
+	var input platform.CreateSubscriptionInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	result, err := s.platform.CreateSubscription(c.Request().Context(), input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "billing.create_failed", "Internal error", err.Error())
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listTenantInvoices(c echo.Context) error {
+	_, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.platform.ListInvoices(c.Request().Context())
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "billing.list_failed", "Internal error", "Could not fetch invoices")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) sendTenantInvoice(c echo.Context) error {
+	principal, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	hasPerm, err := s.platform.HasPermission(c.Request().Context(), principal.OperatorID, "platform:manage_billing")
+	if err != nil || !hasPerm {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No billing permission")
+	}
+
+	result, err := s.platform.SendInvoice(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "billing.update_failed", "Internal error", "Could not send invoice")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) recordInvoicePayment(c echo.Context) error {
+	principal, ok := PlatformPrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	hasPerm, err := s.platform.HasPermission(c.Request().Context(), principal.OperatorID, "platform:manage_billing")
+	if err != nil || !hasPerm {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No billing permission")
+	}
+
+	var input platform.RecordPaymentInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	result, err := s.platform.RecordPayment(c.Request().Context(), c.Param("id"), input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "billing.payment_failed", "Internal error", "Could not record payment")
+	}
+	return c.JSON(http.StatusOK, result)
+}

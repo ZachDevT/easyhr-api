@@ -1398,6 +1398,142 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
+  /platform/plans:
+    get:
+      tags: [Platform]
+      summary: List platform plans
+      operationId: listPlatformPlans
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PlatformPlan' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /platform/settlement-methods:
+    get:
+      tags: [Platform]
+      summary: List settlement methods
+      operationId: listSettlementMethods
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SettlementMethod' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Platform]
+      summary: Create a settlement method
+      operationId: createSettlementMethod
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSettlementMethod' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SettlementMethod' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /platform/subscriptions:
+    get:
+      tags: [Platform]
+      summary: List tenant subscriptions
+      operationId: listTenantSubscriptions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TenantSubscription' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Platform]
+      summary: Create or update a tenant subscription
+      operationId: createTenantSubscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTenantSubscription' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TenantSubscription' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /platform/invoices:
+    get:
+      tags: [Platform]
+      summary: List tenant invoices
+      operationId: listTenantInvoices
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TenantInvoice' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /platform/invoices/{id}/send:
+    post:
+      tags: [Platform]
+      summary: Send a draft invoice via email
+      operationId: sendTenantInvoice
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Id' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TenantInvoice' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /platform/invoices/{id}/record-payment:
+    post:
+      tags: [Platform]
+      summary: Record a manual transaction for an invoice
+      operationId: recordInvoicePayment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecordPaymentRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TenantTransaction' }
+        default:
+          $ref: '#/components/responses/Problem'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1945,6 +2081,82 @@ components:
       properties:
         organizationId: { $ref: '#/components/schemas/Id' }
         reason: { type: string, minLength: 5 }
+
+    PlatformPlan:
+      type: object
+      required: [id, name, pricePerEmployeeMinor, currency, billingInterval, requiresManualInvoicing]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        name: { type: string }
+        pricePerEmployeeMinor: { type: integer }
+        currency: { type: string }
+        billingInterval: { type: string }
+        requiresManualInvoicing: { type: boolean }
+    SettlementMethod:
+      type: object
+      required: [id, providerType, merchantName, identifier, region, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        providerType: { type: string }
+        merchantName: { type: string }
+        identifier: { type: string }
+        region: { type: string }
+        status: { type: string }
+    CreateSettlementMethod:
+      type: object
+      required: [providerType, merchantName, identifier, region]
+      properties:
+        providerType: { type: string }
+        merchantName: { type: string }
+        identifier: { type: string }
+        region: { type: string }
+    TenantSubscription:
+      type: object
+      required: [id, organizationId, planId, status, currentPeriodStart, currentPeriodEnd, billedEmployeesCount]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        organizationId: { $ref: '#/components/schemas/Id' }
+        planId: { $ref: '#/components/schemas/Id' }
+        status: { type: string }
+        currentPeriodStart: { type: string, format: date-time }
+        currentPeriodEnd: { type: string, format: date-time }
+        billedEmployeesCount: { type: integer }
+    CreateTenantSubscription:
+      type: object
+      required: [organizationId, planId]
+      properties:
+        organizationId: { $ref: '#/components/schemas/Id' }
+        planId: { $ref: '#/components/schemas/Id' }
+    TenantInvoice:
+      type: object
+      required: [id, invoiceNumber, organizationId, subscriptionId, amountMinor, currency, status, dueDate]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        invoiceNumber: { type: string }
+        organizationId: { $ref: '#/components/schemas/Id' }
+        subscriptionId: { $ref: '#/components/schemas/Id' }
+        amountMinor: { type: integer }
+        currency: { type: string }
+        status: { type: string }
+        dueDate: { type: string, format: date }
+        sentAt: { type: string, format: date-time }
+        paidAt: { type: string, format: date-time }
+    RecordPaymentRequest:
+      type: object
+      required: [settlementMethodId, amountMinor]
+      properties:
+        settlementMethodId: { $ref: '#/components/schemas/Id' }
+        amountMinor: { type: integer }
+    TenantTransaction:
+      type: object
+      required: [id, invoiceId, settlementMethodId, amountMinor, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        invoiceId: { $ref: '#/components/schemas/Id' }
+        settlementMethodId: { $ref: '#/components/schemas/Id' }
+        amountMinor: { type: integer }
+        status: { type: string }
+        settledAt: { type: string, format: date-time }
 
   responses:
     Problem:
