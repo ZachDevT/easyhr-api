@@ -1163,6 +1163,75 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
+  /scheduling/schedules:
+    get:
+      tags: [Scheduling]
+      summary: List shift schedules
+      operationId: listShiftSchedules
+      responses:
+        '200':
+          description: A list of shift schedules
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ShiftSchedule' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Scheduling]
+      summary: Create a shift schedule
+      operationId: createShiftSchedule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateShiftSchedule' }
+      responses:
+        '200':
+          description: The created schedule
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShiftSchedule' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /employees/{employeeId}/schedules:
+    get:
+      tags: [Scheduling]
+      summary: List shift schedule assignments for an employee
+      operationId: listShiftAssignments
+      parameters:
+        - $ref: '#/components/parameters/EmployeeId'
+      responses:
+        '200':
+          description: A list of shift schedule assignments
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ShiftAssignment' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Scheduling]
+      summary: Assign a shift schedule to an employee
+      operationId: createShiftAssignment
+      parameters:
+        - $ref: '#/components/parameters/EmployeeId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateShiftAssignment' }
+      responses:
+        '200':
+          description: The created assignment
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShiftAssignment' }
+        default:
+          $ref: '#/components/responses/Problem'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1572,6 +1641,52 @@ components:
         newManagerId: { $ref: '#/components/schemas/Id' }
         newCompensationMinor: { type: integer, minimum: 0 }
         rationale: { type: string }
+
+    ShiftEntry:
+      type: object
+      required: [dayOfWeek, startTime, endTime]
+      properties:
+        dayOfWeek: { type: integer, minimum: 0, maximum: 6 }
+        startTime: { type: string, pattern: '^[0-2][0-9]:[0-5][0-9]:[0-5][0-9]$' }
+        endTime: { type: string, pattern: '^[0-2][0-9]:[0-5][0-9]:[0-5][0-9]$' }
+        breakMinutes: { type: integer, minimum: 0 }
+    ShiftSchedule:
+      type: object
+      required: [id, name, timezone]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        name: { type: string }
+        timezone: { type: string }
+        description: { type: string }
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/ShiftEntry' }
+    CreateShiftSchedule:
+      type: object
+      required: [name, timezone, entries]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+        timezone: { type: string }
+        description: { type: string }
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/ShiftEntry' }
+    ShiftAssignment:
+      type: object
+      required: [id, employeeId, scheduleId, effectiveFrom]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        employeeId: { $ref: '#/components/schemas/Id' }
+        scheduleId: { $ref: '#/components/schemas/Id' }
+        effectiveFrom: { type: string, format: date }
+        effectiveTo: { type: [string, 'null'], format: date }
+    CreateShiftAssignment:
+      type: object
+      required: [scheduleId, effectiveFrom]
+      properties:
+        scheduleId: { $ref: '#/components/schemas/Id' }
+        effectiveFrom: { type: string, format: date }
+        effectiveTo: { type: string, format: date }
 
   responses:
     Problem:

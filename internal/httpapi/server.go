@@ -26,6 +26,7 @@ import (
 	"github.com/easyhr/easyhr-be/internal/performance"
 	"github.com/easyhr/easyhr-be/internal/promotions"
 	"github.com/easyhr/easyhr-be/internal/relations"
+	"github.com/easyhr/easyhr-be/internal/scheduling"
 	"github.com/easyhr/easyhr-be/internal/signatures"
 	"github.com/easyhr/easyhr-be/internal/tenancy"
 	"github.com/easyhr/easyhr-be/internal/timeoff"
@@ -49,6 +50,7 @@ type Server struct {
 	workflows     *workflows.Service
 	benefits      *benefits.Service
 	promotions    *promotions.Service
+	scheduling    *scheduling.Service
 	attendance    *attendance.Service
 	onboarding    *onboarding.Service
 	documents     *documents.Service
@@ -80,7 +82,7 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 		MaxAge:           86400,
 	}))
 
-	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
+	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
 	if authentication != nil {
 		s.authenticated = e.Group("/api/v1")
 		s.authenticated.Use(adaptHTTPMiddleware(authentication))
@@ -1545,6 +1547,81 @@ func (s *Server) executePromotion(c echo.Context) error {
 			return problem(c, http.StatusNotFound, "promotions.not_found", "Not found", "Resource not found")
 		}
 		return problem(c, http.StatusInternalServerError, "promotions.execute_failed", "Internal error", "Could not execute promotion")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listShiftSchedules(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("scheduling:read") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
+	}
+	result, err := s.scheduling.ListSchedules(c.Request().Context(), principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "scheduling.list_failed", "Internal error", "Could not fetch schedules")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createShiftSchedule(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("scheduling:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
+	}
+	var input scheduling.CreateScheduleInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	result, err := s.scheduling.CreateSchedule(c.Request().Context(), principal.OrganizationID, principal.UserID, input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "scheduling.create_failed", "Internal error", "Could not create schedule")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listShiftAssignments(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("scheduling:read") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
+	}
+	result, err := s.scheduling.ListAssignments(c.Request().Context(), principal.OrganizationID, c.Param("employeeId"))
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "scheduling.list_failed", "Internal error", "Could not fetch assignments")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createShiftAssignment(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("scheduling:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
+	}
+	var input scheduling.CreateAssignmentInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	result, err := s.scheduling.CreateAssignment(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Param("employeeId"), input)
+	if err != nil {
+		if errors.Is(err, scheduling.ErrNotFound) {
+			return problem(c, http.StatusNotFound, "scheduling.not_found", "Not found", "Resource not found")
+		}
+		return problem(c, http.StatusInternalServerError, "scheduling.create_failed", "Internal error", "Could not create assignment")
 	}
 	return c.JSON(http.StatusOK, result)
 }
