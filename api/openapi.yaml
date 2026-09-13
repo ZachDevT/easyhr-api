@@ -1232,6 +1232,103 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
+  /holidays:
+    get:
+      tags: [Holidays]
+      summary: List company holidays
+      operationId: listHolidays
+      responses:
+        '200':
+          description: A list of company holidays
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CompanyHoliday' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Holidays]
+      summary: Create a company holiday
+      operationId: createHoliday
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCompanyHoliday' }
+      responses:
+        '200':
+          description: The created holiday
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CompanyHoliday' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /offboarding:
+    get:
+      tags: [Offboarding]
+      summary: List offboarding plans
+      operationId: listOffboardingPlans
+      responses:
+        '200':
+          description: A list of offboarding plans
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/OffboardingPlan' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Offboarding]
+      summary: Create an offboarding plan
+      operationId: createOffboardingPlan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOffboardingPlan' }
+      responses:
+        '200':
+          description: The created plan
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OffboardingPlan' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /policies:
+    get:
+      tags: [Policies]
+      summary: List company policies
+      operationId: listPolicies
+      responses:
+        '200':
+          description: A list of company policies
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CompanyPolicy' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Policies]
+      summary: Create a company policy
+      operationId: createPolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCompanyPolicy' }
+      responses:
+        '200':
+          description: The created policy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CompanyPolicy' }
+        default:
+          $ref: '#/components/responses/Problem'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1687,6 +1784,61 @@ components:
         scheduleId: { $ref: '#/components/schemas/Id' }
         effectiveFrom: { type: string, format: date }
         effectiveTo: { type: string, format: date }
+
+    CompanyHoliday:
+      type: object
+      required: [id, name, holidayDate, holidayType, appliesTo]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        name: { type: string }
+        holidayDate: { type: string, format: date }
+        holidayType: { type: string, enum: [national, company] }
+        appliesTo: { type: string }
+    CreateCompanyHoliday:
+      type: object
+      required: [name, holidayDate, holidayType]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+        holidayDate: { type: string, format: date }
+        holidayType: { type: string, enum: [national, company] }
+        appliesTo: { type: string }
+    OffboardingPlan:
+      type: object
+      required: [id, employeeId, lastWorkingDay, reason, riskStatus, progressPercentage]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        employeeId: { $ref: '#/components/schemas/Id' }
+        ownerId: { $ref: '#/components/schemas/Id' }
+        lastWorkingDay: { type: string, format: date }
+        reason: { type: string }
+        riskStatus: { type: string, enum: [on_track, at_risk, complete] }
+        progressPercentage: { type: integer, minimum: 0, maximum: 100 }
+    CreateOffboardingPlan:
+      type: object
+      required: [employeeId, lastWorkingDay, reason]
+      properties:
+        employeeId: { $ref: '#/components/schemas/Id' }
+        ownerId: { $ref: '#/components/schemas/Id' }
+        lastWorkingDay: { type: string, format: date }
+        reason: { type: string }
+    CompanyPolicy:
+      type: object
+      required: [id, title, category, requiresSignature, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        documentId: { $ref: '#/components/schemas/Id' }
+        title: { type: string }
+        category: { type: string }
+        requiresSignature: { type: boolean }
+        status: { type: string, enum: [active, archived] }
+    CreateCompanyPolicy:
+      type: object
+      required: [title, category, requiresSignature]
+      properties:
+        documentId: { $ref: '#/components/schemas/Id' }
+        title: { type: string, minLength: 1, maxLength: 255 }
+        category: { type: string }
+        requiresSignature: { type: boolean }
 
   responses:
     Problem:
