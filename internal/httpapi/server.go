@@ -19,6 +19,7 @@ import (
 	"github.com/easyhr/easyhr-be/internal/documents"
 	"github.com/easyhr/easyhr-be/internal/identity"
 	"github.com/easyhr/easyhr-be/internal/onboarding"
+	"github.com/easyhr/easyhr-be/internal/payroll"
 	"github.com/easyhr/easyhr-be/internal/people"
 	"github.com/easyhr/easyhr-be/internal/tenancy"
 	"github.com/easyhr/easyhr-be/internal/timeoff"
@@ -33,6 +34,7 @@ type Server struct {
 	provisioner   *identity.Provisioner
 	people        *people.Directory
 	timeOff       *timeoff.Service
+	payroll       *payroll.Service
 	attendance    *attendance.Service
 	onboarding    *onboarding.Service
 	documents     *documents.Service
@@ -64,7 +66,7 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 		MaxAge:           86400,
 	}))
 
-	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
+	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
 	if authentication != nil {
 		s.authenticated = e.Group("/api/v1")
 		s.authenticated.Use(adaptHTTPMiddleware(authentication))
@@ -983,4 +985,79 @@ func (s *Server) getDocumentDownloadUrl(c echo.Context) error {
 		return problem(c, http.StatusNotFound, "documents.download_failed", "Not found", "Document could not be downloaded")
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listPayrollConfigurations(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok { return c.NoContent(http.StatusUnauthorized) }
+	if !principal.HasPermission("payroll:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view payroll configurations")
+	}
+	result, err := s.payroll.ListConfigurations(c.Request().Context(), principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "payroll.list_failed", "Internal server error", "Could not load payroll configurations")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listPayrollPeriods(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok { return c.NoContent(http.StatusUnauthorized) }
+	if !principal.HasPermission("payroll:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view payroll periods")
+	}
+	result, err := s.payroll.ListPeriods(c.Request().Context(), principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "payroll.periods_failed", "Internal server error", "Could not load payroll periods")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createPayrollPeriod(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok { return c.NoContent(http.StatusUnauthorized) }
+	if !principal.HasPermission("payroll:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage payroll")
+	}
+	var input payroll.CreatePeriodInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request", err.Error())
+	}
+	result, err := s.payroll.CreatePeriod(c.Request().Context(), principal.OrganizationID, principal.UserID, input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "payroll.period_create_failed", "Internal server error", "Could not create payroll period")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createPayrollRun(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok { return c.NoContent(http.StatusUnauthorized) }
+	if !principal.HasPermission("payroll:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage payroll")
+	}
+	result, err := s.payroll.InitiateRun(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Param("periodId"))
+	if err != nil {
+		if errors.Is(err, payroll.ErrNotFound) {
+			return problem(c, http.StatusNotFound, "payroll.period_not_found", "Not found", "Payroll period not found")
+		}
+		return problem(c, http.StatusInternalServerError, "payroll.run_failed", "Internal server error", "Could not initiate payroll run")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) lockPayrollRun(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok { return c.NoContent(http.StatusUnauthorized) }
+	if !principal.HasPermission("payroll:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage payroll")
+	}
+	err := s.payroll.LockRun(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Param("runId"))
+	if err != nil {
+		if errors.Is(err, payroll.ErrInvalidState) {
+			return problem(c, http.StatusConflict, "payroll.invalid_state", "Conflict", "Run cannot be locked in its current state")
+		}
+		return problem(c, http.StatusInternalServerError, "payroll.lock_failed", "Internal server error", "Could not lock payroll run")
+	}
+	return c.NoContent(http.StatusNoContent)
 }

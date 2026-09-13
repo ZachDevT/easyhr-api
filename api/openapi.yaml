@@ -638,6 +638,81 @@ paths:
                   expiresAt: { type: string, format: date-time }
         default:
           $ref: '#/components/responses/Problem'
+  /payroll/configurations:
+    get:
+      tags: [Payroll]
+      summary: List payroll configurations
+      operationId: listPayrollConfigurations
+      responses:
+        '200':
+          description: A list of payroll configurations
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PayrollConfiguration' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /payroll/periods:
+    get:
+      tags: [Payroll]
+      summary: List payroll periods
+      operationId: listPayrollPeriods
+      responses:
+        '200':
+          description: A list of payroll periods
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PayrollPeriod' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Payroll]
+      summary: Create a payroll period
+      operationId: createPayrollPeriod
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePayrollPeriod' }
+      responses:
+        '200':
+          description: The created payroll period
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayrollPeriod' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /payroll/periods/{periodId}/runs:
+    post:
+      tags: [Payroll]
+      summary: Initiate a payroll run calculation
+      operationId: createPayrollRun
+      parameters:
+        - $ref: '#/components/parameters/PeriodId'
+      responses:
+        '200':
+          description: The initiated payroll run
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayrollRun' }
+        default:
+          $ref: '#/components/responses/Problem'
+  /payroll/runs/{runId}/lock:
+    post:
+      tags: [Payroll]
+      summary: Lock a payroll run and generate paystubs
+      operationId: lockPayrollRun
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '204':
+          description: Payroll run locked successfully
+        default:
+          $ref: '#/components/responses/Problem'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -669,6 +744,17 @@ components:
       in: path
       required: true
       schema: { $ref: '#/components/schemas/Id' }
+    PeriodId:
+      name: periodId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Id' }
+    RunId:
+      name: runId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Id' }
+
     PunchId:
       name: punchId
       in: path
@@ -689,6 +775,39 @@ components:
       in: path
       required: true
       schema: { $ref: '#/components/schemas/Id' }
+    PayrollConfiguration:
+      type: object
+      required: [id, country, currency, standardMonthlyMinutes]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        country: { type: string, pattern: '^[A-Z]{2}$' }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        standardMonthlyMinutes: { type: integer, minimum: 1 }
+    PayrollPeriod:
+      type: object
+      required: [id, startDate, endDate, payDate, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        payDate: { type: string, format: date }
+        status: { type: string, enum: [draft, processing, review, locked, paid] }
+    CreatePayrollPeriod:
+      type: object
+      required: [startDate, endDate, payDate]
+      properties:
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        payDate: { type: string, format: date }
+    PayrollRun:
+      type: object
+      required: [id, payrollPeriodId, status]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        payrollPeriodId: { $ref: '#/components/schemas/Id' }
+        status: { type: string, enum: [draft, calculated, approved] }
+        approvedAt: { type: [string, 'null'], format: date-time }
+
   responses:
     Problem:
       description: RFC 9457-style API problem
