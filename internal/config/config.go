@@ -7,12 +7,14 @@ import (
 )
 
 type Config struct {
-	Environment    string
-	HTTPAddress    string
-	DatabaseURL    string
-	AllowedOrigins []string
-	Clerk          ClerkConfig
-	Documents      DocumentStorageConfig
+	Environment       string
+	HTTPAddress       string
+	DatabaseURL       string
+	AllowedOrigins    []string
+	Clerk             ClerkConfig
+	Documents         DocumentStorageConfig
+	PlatformJWTSecret string
+	DocuSign          DocuSignConfig
 }
 
 type ClerkConfig struct {
@@ -29,6 +31,12 @@ type DocumentStorageConfig struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	UsePathStyle    bool
+}
+
+type DocuSignConfig struct {
+	APIUrl     string
+	AccountID  string
+	PrivateKey []byte
 }
 
 func Load() (Config, error) {
@@ -53,6 +61,12 @@ func Load() (Config, error) {
 			AccessKeyID:     strings.TrimSpace(os.Getenv("EASYHR_DOCUMENTS_S3_ACCESS_KEY_ID")),
 			SecretAccessKey: strings.TrimSpace(os.Getenv("EASYHR_DOCUMENTS_S3_SECRET_ACCESS_KEY")),
 			UsePathStyle:    strings.EqualFold(strings.TrimSpace(os.Getenv("EASYHR_DOCUMENTS_S3_USE_PATH_STYLE")), "true"),
+		},
+		PlatformJWTSecret: defaultString(os.Getenv("EASYHR_PLATFORM_JWT_SECRET"), "fallback_secret"),
+		DocuSign: DocuSignConfig{
+			APIUrl:     defaultString(os.Getenv("EASYHR_DOCUSIGN_API_URL"), "https://demo.docusign.net"),
+			AccountID:  defaultString(os.Getenv("EASYHR_DOCUSIGN_ACCOUNT_ID"), "dummy-account"),
+			PrivateKey: []byte(os.Getenv("EASYHR_DOCUSIGN_PRIVATE_KEY")),
 		},
 	}
 

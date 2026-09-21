@@ -141,6 +141,8 @@ func (s *Server) registerRoutes() {
 	// Public Routes
 	s.echo.POST("/api/v1/public/contact", s.submitPublicContact)
 
+	s.registerDocs()
+
 	s.echo.GET("/healthz", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 	})

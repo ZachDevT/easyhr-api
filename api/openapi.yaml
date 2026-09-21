@@ -136,6 +136,26 @@ paths:
               schema: { $ref: '#/components/schemas/Employee' }
         default:
           $ref: '#/components/responses/Problem'
+    patch:
+      tags: [Employees]
+      summary: Update permitted employee profile fields
+      description: Compensation, legal identity and employment-term changes use separate audited endpoints.
+      operationId: updateEmployee
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateEmployeeRequest' }
+      responses:
+        '200':
+          description: Updated employee
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Employee' }
+        default:
+          $ref: '#/components/responses/Problem'
   /departments:
     get:
       tags: [Organization]
@@ -153,6 +173,23 @@ paths:
                   data:
                     type: array
                     items: { $ref: '#/components/schemas/Department' }
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [Organization]
+      summary: Create a department
+      operationId: createDepartment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateDepartmentRequest' }
+      responses:
+        '201':
+          description: Department created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Department' }
         default:
           $ref: '#/components/responses/Problem'
   /divisions:
@@ -189,43 +226,6 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Division' }
-        default:
-          $ref: '#/components/responses/Problem'
-    post:
-      tags: [Organization]
-      summary: Create a department
-      operationId: createDepartment
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/CreateDepartmentRequest' }
-      responses:
-        '201':
-          description: Department created
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Department' }
-        default:
-          $ref: '#/components/responses/Problem'
-    patch:
-      tags: [Employees]
-      summary: Update permitted employee profile fields
-      description: Compensation, legal identity and employment-term changes use separate audited endpoints.
-      operationId: updateEmployee
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/UpdateEmployeeRequest' }
-      responses:
-        '200':
-          description: Updated employee
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Employee' }
         default:
           $ref: '#/components/responses/Problem'
   /leave/balances:
@@ -1903,11 +1903,6 @@ components:
       in: path
       required: true
       schema: { $ref: '#/components/schemas/Id' }
-    TaskId:
-      name: taskId
-      in: path
-      required: true
-      schema: { $ref: '#/components/schemas/Id' }
     DocumentId:
       name: documentId
       in: path
@@ -2735,7 +2730,6 @@ components:
         personalEmail: { type: string, format: email }
         departmentId: { $ref: '#/components/schemas/Id' }
         managerId: { $ref: '#/components/schemas/Id' }
-        jobTitle: { type: string, maxLength: 160 }
         hiredOn: { type: string, format: date }
         employmentType: { type: string, enum: [full_time, part_time, fixed_term, contractor, intern] }
         workerType: { type: string, enum: [employee, contractor] }

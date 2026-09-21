@@ -25,6 +25,8 @@ CREATE TABLE shift_entries (
     UNIQUE (schedule_id, day_of_week)
 );
 
+DROP TABLE IF EXISTS shift_assignments CASCADE;
+
 CREATE TABLE shift_assignments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
