@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/clerk/clerk-sdk-go/v2"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -183,6 +184,7 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/leave/requests/:requestId/cancel", s.cancelLeaveRequest)
 		s.authenticated.POST("/setup/organizations", s.createOrganization)
 		s.authenticated.POST("/auth/provision", s.provisionIdentity)
+		s.authenticated.GET("/setup/status", s.checkSetupStatus)
 	}
 }
 
@@ -922,6 +924,37 @@ func (s *Server) checkSubdomainAvailability(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]any{"available": false, "reason": "This workspace URL is already in use"})
 	}
 	return c.JSON(http.StatusOK, map[string]any{"available": true})
+}
+
+func (s *Server) checkSetupStatus(c echo.Context) error {
+	claims, ok := clerk.SessionClaimsFromContext(c.Request().Context())
+	if !ok || claims == nil || claims.Subject == "" {
+		return problem(c, http.StatusUnauthorized, "auth.missing_token", "Unauthorized", "A verified session is required")
+	}
+
+	var hasOrg bool
+	var orgID, orgName, subdomain string
+	err := s.pool.QueryRow(c.Request().Context(), `
+		SELECT o.id::text, o.name, COALESCE(w.subdomain, '')
+		FROM users u
+		JOIN memberships m ON m.user_id = u.id AND m.status = 'active'
+		JOIN organizations o ON o.id = m.organization_id
+		LEFT JOIN workspaces w ON w.organization_id = o.id
+		WHERE u.external_identity_id = $1
+		LIMIT 1`, claims.Subject).Scan(&orgID, &orgName, &subdomain)
+
+	if err == nil {
+		hasOrg = true
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return problem(c, http.StatusInternalServerError, "database.lookup_failed", "Internal error", "Could not check organization status")
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"hasOrganization": hasOrg,
+		"organizationId":  orgID,
+		"organizationName": orgName,
+		"subdomain":       subdomain,
+	})
 }
 
 func (s *Server) createOrganization(c echo.Context) error {
