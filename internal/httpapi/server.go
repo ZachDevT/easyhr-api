@@ -140,6 +140,7 @@ func (s *Server) Handler() http.Handler { return s.echo }
 func (s *Server) registerRoutes() {
 	// Public Routes
 	s.echo.POST("/api/v1/public/contact", s.submitPublicContact)
+	s.echo.GET("/api/v1/public/check-subdomain", s.checkSubdomainAvailability)
 
 	s.registerDocs()
 
@@ -894,6 +895,35 @@ func (s *Server) provisionIdentity(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+func (s *Server) checkSubdomainAvailability(c echo.Context) error {
+	subdomain := strings.ToLower(strings.TrimSpace(c.QueryParam("subdomain")))
+	if subdomain == "" {
+		return c.JSON(http.StatusOK, map[string]any{"available": false, "reason": "Subdomain cannot be empty"})
+	}
+	if len(subdomain) < 2 || len(subdomain) > 63 {
+		return c.JSON(http.StatusOK, map[string]any{"available": false, "reason": "Subdomain must be between 2 and 63 characters"})
+	}
+	// Check against reserved subdomains
+	reserved := map[string]bool{
+		"api": true, "app": true, "admin": true, "auth": true, "billing": true,
+		"dashboard": true, "docs": true, "mail": true, "support": true, "www": true,
+		"staging": true, "dev": true, "test": true, "demo": true,
+	}
+	if reserved[subdomain] {
+		return c.JSON(http.StatusOK, map[string]any{"available": false, "reason": "This workspace URL is reserved"})
+	}
+
+	var exists bool
+	err := s.pool.QueryRow(c.Request().Context(), `SELECT EXISTS(SELECT 1 FROM workspaces WHERE subdomain = $1)`, subdomain).Scan(&exists)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "database.lookup_failed", "Internal error", "Could not check subdomain availability")
+	}
+	if exists {
+		return c.JSON(http.StatusOK, map[string]any{"available": false, "reason": "This workspace URL is already in use"})
+	}
+	return c.JSON(http.StatusOK, map[string]any{"available": true})
+}
+
 func (s *Server) createOrganization(c echo.Context) error {
 	claims, ok := clerk.SessionClaimsFromContext(c.Request().Context())
 	if !ok || claims == nil || claims.Subject == "" {
@@ -910,7 +940,7 @@ func (s *Server) createOrganization(c echo.Context) error {
 		case errors.Is(err, tenancy.ErrSetupUserNotProvisioned):
 			return problem(c, http.StatusConflict, "identity.not_provisioned", "Account not ready", "The authenticated account has not been provisioned by the identity sync")
 		case errors.Is(err, tenancy.ErrSetupConflict):
-			return problem(c, http.StatusConflict, "organization.conflict", "Organization setup conflict", "The requested workspace or organization data already exists")
+			return problem(c, http.StatusConflict, "organization.conflict", "Organization setup conflict", err.Error())
 		case errors.Is(err, tenancy.ErrIdempotencyKeyReused):
 			return problem(c, http.StatusConflict, "idempotency.key_reused", "Idempotency key conflict", "The Idempotency-Key was previously used for a different request")
 		case strings.Contains(err.Error(), "must ") || strings.Contains(err.Error(), "not currently supported") || strings.Contains(err.Error(), "unsupported platform"):

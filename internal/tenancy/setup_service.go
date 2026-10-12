@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -210,7 +211,13 @@ func nullIfBlank(value string) any {
 func normalizeSetupError(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-		return ErrSetupConflict
+		slog.Error("setup unique constraint violation",
+			"table", pgErr.TableName,
+			"constraint", pgErr.ConstraintName,
+			"detail", pgErr.Detail,
+			"message", pgErr.Message,
+		)
+		return fmt.Errorf("%w: %s (%s)", ErrSetupConflict, pgErr.ConstraintName, pgErr.Detail)
 	}
 	return err
 }
