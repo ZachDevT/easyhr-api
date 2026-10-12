@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -163,6 +164,7 @@ func (s *Server) registerRoutes() {
 		s.api.GET("/divisions", s.listDivisions)
 		s.api.POST("/divisions", s.createDivision)
 		s.api.POST("/employees", s.createEmployee)
+		s.api.POST("/employees/:employeeId/activate", s.activateEmployee)
 		s.api.POST("/leave/requests", s.submitLeaveRequest)
 		s.api.GET("/leave/requests", s.listLeaveRequests)
 		s.api.GET("/leave/balances", s.listLeaveBalances)
@@ -912,7 +914,15 @@ func (s *Server) createEmployee(c echo.Context) error {
 	if err := c.Bind(&input); err != nil {
 		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_json", "Invalid request", "Request body must be valid JSON")
 	}
-	result, err := s.people.Create(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Response().Header().Get(echo.HeaderXRequestID), c.Request().Header.Get("Idempotency-Key"), input)
+	idemKey := c.Request().Header.Get("Idempotency-Key")
+	if len(idemKey) < 16 {
+		idemKey = fmt.Sprintf("idem-%d-%s", time.Now().UnixNano(), principal.UserID)
+	}
+	reqID := c.Response().Header().Get(echo.HeaderXRequestID)
+	if reqID == "" {
+		reqID = "req-" + principal.UserID
+	}
+	result, err := s.people.Create(c.Request().Context(), principal.OrganizationID, principal.UserID, reqID, idemKey, input)
 	if err != nil {
 		switch {
 		case errors.Is(err, people.ErrCreateConflict):
@@ -920,10 +930,28 @@ func (s *Server) createEmployee(c echo.Context) error {
 		case errors.Is(err, people.ErrIdempotencyReused):
 			return problem(c, http.StatusConflict, "idempotency.key_reused", "Idempotency key conflict", "The Idempotency-Key was previously used for a different request")
 		default:
-			return problem(c, http.StatusUnprocessableEntity, "validation.invalid_employee", "Invalid employee", "Employee data or referenced organization record is invalid")
+			return problem(c, http.StatusUnprocessableEntity, "validation.invalid_employee", "Invalid employee", err.Error())
 		}
 	}
 	return c.JSON(http.StatusCreated, result)
+}
+
+func (s *Server) activateEmployee(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	if !principal.HasPermission("employees:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage employees")
+	}
+	employeeID := c.Param("employeeId")
+	if err := s.people.Activate(c.Request().Context(), principal.OrganizationID, employeeID); err != nil {
+		if errors.Is(err, people.ErrEmployeeNotFound) {
+			return problem(c, http.StatusNotFound, "employee.not_found", "Not found", "Employee not found")
+		}
+		return problem(c, http.StatusInternalServerError, "employee.activation_failed", "Internal error", "Could not activate employee")
+	}
+	return c.NoContent(http.StatusNoContent)
 }
 
 func (s *Server) listEmployees(c echo.Context) error {
