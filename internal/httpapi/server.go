@@ -157,6 +157,9 @@ func (s *Server) registerRoutes() {
 		s.api.PATCH("/employees/:employeeId", s.updateEmployee)
 		s.api.GET("/departments", s.listDepartments)
 		s.api.POST("/departments", s.createDepartment)
+		s.api.GET("/departments/:departmentId/positions", s.listDepartmentPositions)
+		s.api.POST("/departments/:departmentId/positions", s.createDepartmentPosition)
+		s.api.GET("/departments/:departmentId/members", s.listDepartmentMembers)
 		s.api.GET("/divisions", s.listDivisions)
 		s.api.POST("/divisions", s.createDivision)
 		s.api.POST("/employees", s.createEmployee)
@@ -271,6 +274,58 @@ func (s *Server) createDepartment(c echo.Context) error {
 		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_department", "Invalid department", err.Error())
 	}
 	return c.JSON(http.StatusCreated, result)
+}
+
+func (s *Server) listDepartmentPositions(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	if !principal.HasPermission("organization:read") && !principal.HasPermission("employees:read") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view department positions")
+	}
+	departmentID := c.Param("departmentId")
+	result, err := s.departments.ListPositions(c.Request().Context(), principal.OrganizationID, departmentID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "positions.lookup_failed", "Internal server error", "Could not retrieve department positions")
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": result})
+}
+
+func (s *Server) createDepartmentPosition(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	if !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage department positions")
+	}
+	departmentID := c.Param("departmentId")
+	var input tenancy.CreatePositionInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_json", "Invalid request", "Request body must be valid JSON")
+	}
+	result, err := s.departments.CreatePosition(c.Request().Context(), principal.OrganizationID, departmentID, input)
+	if err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_position", "Invalid position", err.Error())
+	}
+	return c.JSON(http.StatusCreated, result)
+}
+
+func (s *Server) listDepartmentMembers(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	if !principal.HasPermission("organization:read") && !principal.HasPermission("employees:read") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view department members")
+	}
+	departmentID := c.Param("departmentId")
+	result, err := s.departments.ListMembers(c.Request().Context(), principal.OrganizationID, departmentID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "members.lookup_failed", "Internal server error", "Could not retrieve department members")
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": result})
 }
 
 func (s *Server) updateEmployee(c echo.Context) error {
