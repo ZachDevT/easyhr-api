@@ -214,6 +214,7 @@ func (s *Server) registerRoutes() {
 	}
 	s.echo.GET("/api/v1/public/assets/*", s.servePublicAsset)
 	s.echo.GET("/api/v1/public/jobs", s.listPublicJobs)
+	s.echo.GET("/api/v1/public/company", s.getPublicCompany)
 	s.echo.POST("/api/v1/public/jobs/:postingId/apply", s.applyForJob)
 }
 
@@ -1490,13 +1491,62 @@ func (s *Server) executeRelationAction(c echo.Context) error {
 func (s *Server) listPublicJobs(c echo.Context) error {
 	orgID := c.QueryParam("organizationId")
 	if orgID == "" {
-		return c.NoContent(http.StatusBadRequest)
+		_ = s.pool.QueryRow(c.Request().Context(), "SELECT id::text FROM organizations ORDER BY created_at ASC LIMIT 1").Scan(&orgID)
+	}
+	if orgID == "" {
+		return c.JSON(http.StatusOK, []any{})
 	}
 	result, err := s.hiring.ListPublicPostings(c.Request().Context(), orgID)
 	if err != nil {
 		return problem(c, http.StatusInternalServerError, "hiring.list_public_failed", "Internal server error", "Could not load jobs")
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) getPublicCompany(c echo.Context) error {
+	orgID := c.QueryParam("organizationId")
+	var id, name, logoURL, brandColor, industry, websiteURL string
+
+	var err error
+	if orgID != "" {
+		err = s.pool.QueryRow(c.Request().Context(), `
+			SELECT o.id::text, o.name, COALESCE(w.logo_url, ''), COALESCE(w.brand_color, '#4F46E5'),
+			       COALESCE(lp.industry, 'Technology & Business'), COALESCE(lp.website_url, '')
+			FROM organizations o
+			LEFT JOIN workspaces w ON w.organization_id = o.id
+			LEFT JOIN organization_legal_profiles lp ON lp.organization_id = o.id
+			WHERE o.id = $1::uuid
+			LIMIT 1`, orgID).Scan(&id, &name, &logoURL, &brandColor, &industry, &websiteURL)
+	} else {
+		err = s.pool.QueryRow(c.Request().Context(), `
+			SELECT o.id::text, o.name, COALESCE(w.logo_url, ''), COALESCE(w.brand_color, '#4F46E5'),
+			       COALESCE(lp.industry, 'Technology & Business'), COALESCE(lp.website_url, '')
+			FROM organizations o
+			LEFT JOIN workspaces w ON w.organization_id = o.id
+			LEFT JOIN organization_legal_profiles lp ON lp.organization_id = o.id
+			ORDER BY o.created_at ASC
+			LIMIT 1`).Scan(&id, &name, &logoURL, &brandColor, &industry, &websiteURL)
+	}
+
+	if err != nil {
+		return c.JSON(http.StatusOK, map[string]any{
+			"id":         "",
+			"name":       "ProjectEasyHR",
+			"logoUrl":    "",
+			"brandColor": "#4F46E5",
+			"industry":   "Human Resources & Talent",
+			"websiteUrl": "https://projecteasyhr.com",
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"id":         id,
+		"name":       name,
+		"logoUrl":    logoURL,
+		"brandColor": brandColor,
+		"industry":   industry,
+		"websiteUrl": websiteURL,
+	})
 }
 
 func (s *Server) applyForJob(c echo.Context) error {

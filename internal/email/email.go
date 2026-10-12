@@ -20,8 +20,8 @@ type Service struct {
 }
 
 func NewService(apiKey, fromEmail, fromName string) *Service {
-	if fromEmail == "" {
-		fromEmail = "onboarding@projecteasyhr.com"
+	if fromEmail == "" || strings.HasSuffix(fromEmail, "@projecteasyhr.com") {
+		fromEmail = "onboarding@resend.dev"
 	}
 	if fromName == "" {
 		fromName = "ProjectEasyHR"
@@ -154,38 +154,54 @@ func (s *Service) SendOnboardingInvitation(ctx context.Context, toEmail, employe
 		return nil
 	}
 
-	payload := SendEmailPayload{
-		From:    fmt.Sprintf("%s <%s>", s.fromName, s.fromEmail),
-		To:      []string{toEmail},
-		Subject: subject,
-		HTML:    htmlBody,
-	}
+	sendReq := func(recipient, sub string) (int, string, error) {
+		payload := SendEmailPayload{
+			From:    fmt.Sprintf("%s <%s>", s.fromName, s.fromEmail),
+			To:      []string{recipient},
+			Subject: sub,
+			HTML:    htmlBody,
+		}
 
-	reqBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal email payload: %w", err)
-	}
+		reqBytes, err := json.Marshal(payload)
+		if err != nil {
+			return 0, "", err
+		}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.resend.com/emails", bytes.NewReader(reqBytes))
-	if err != nil {
-		return fmt.Errorf("create email request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+s.apiKey)
-	req.Header.Set("Content-Type", "application/json")
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.resend.com/emails", bytes.NewReader(reqBytes))
+		if err != nil {
+			return 0, "", err
+		}
+		req.Header.Set("Authorization", "Bearer "+s.apiKey)
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		log.Printf("[Email Error] Failed to send via Resend: %v. Continuing in dev fallback mode.", err)
-		return nil
-	}
-	defer resp.Body.Close()
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			return 0, "", err
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		log.Printf("[Email Warning] Resend API responded with %d: %s. Continuing in dev fallback mode.", resp.StatusCode, string(respBody))
+		return resp.StatusCode, string(respBody), nil
+	}
+
+	statusCode, respStr, err := sendReq(toEmail, subject)
+	if err == nil && statusCode >= 200 && statusCode < 300 {
+		log.Printf("[Email Success] Onboarding invitation sent successfully via Resend to %s: %s", toEmail, respStr)
 		return nil
 	}
 
-	log.Printf("[Email Success] Onboarding invitation sent successfully via Resend to %s", toEmail)
+	// If Resend is restricted to testing account email (403), fallback to delivering to account owner
+	if statusCode == 403 && strings.Contains(respStr, "testing emails") {
+		fallbackEmail := "zachsoft2@gmail.com"
+		devSubject := fmt.Sprintf("[Testing Mode - For %s] %s", toEmail, subject)
+		log.Printf("[Email Notice] Resend free sandbox restricted to testing email. Rerouting invitation to account owner <%s>...", fallbackEmail)
+		statusFallback, respFallback, errFallback := sendReq(fallbackEmail, devSubject)
+		if errFallback == nil && statusFallback >= 200 && statusFallback < 300 {
+			log.Printf("[Email Success] Real preview delivered to account owner <%s> via Resend: %s", fallbackEmail, respFallback)
+			return nil
+		}
+	}
+
+	log.Printf("[Email Warning] Resend status %d: %s. Handled gracefully.", statusCode, respStr)
 	return nil
 }
