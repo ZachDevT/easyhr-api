@@ -58,8 +58,17 @@ func (resolver *Resolver) Middleware(next http.Handler) http.Handler {
 
 		workspace := strings.TrimSpace(request.Header.Get("X-EasyHR-Workspace"))
 		if workspace == "" {
-			writeProblem(writer, request, http.StatusBadRequest, "workspace.required", "Workspace required", "X-EasyHR-Workspace is required")
-			return
+			err := resolver.pool.QueryRow(request.Context(), `
+				SELECT w.subdomain
+				FROM users u
+				JOIN memberships m ON m.user_id = u.id AND m.status = 'active'
+				JOIN workspaces w ON w.organization_id = m.organization_id
+				WHERE u.external_identity_id = $1
+				LIMIT 1`, claims.Subject).Scan(&workspace)
+			if err != nil {
+				writeProblem(writer, request, http.StatusForbidden, "membership.not_active", "Forbidden", "No active organization workspace exists for this account")
+				return
+			}
 		}
 
 		principal, err := resolver.resolve(request.Context(), claims.Subject, workspace)

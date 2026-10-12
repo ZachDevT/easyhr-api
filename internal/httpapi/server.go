@@ -3,8 +3,8 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -67,6 +67,7 @@ type Server struct {
 	attendance    *attendance.Service
 	onboarding    *onboarding.Service
 	documents     *documents.Service
+	storage       documents.Storage
 	setup         *tenancy.SetupService
 	departments   *tenancy.DepartmentService
 	divisions     *tenancy.DivisionService
@@ -88,14 +89,14 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOrigins:     allowedOrigins,
-		AllowMethods:     []string{http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodOptions},
+		AllowMethods:     []string{http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodPut, http.MethodDelete, http.MethodOptions},
 		AllowHeaders:     []string{echo.HeaderAuthorization, echo.HeaderContentType, echo.HeaderXRequestID, "Idempotency-Key", "X-EasyHR-Workspace"},
 		ExposeHeaders:    []string{echo.HeaderXRequestID},
 		AllowCredentials: true,
 		MaxAge:           86400,
 	}))
 
-	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), operations: operations.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
+	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), storage: documentStorage, setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), operations: operations.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
 	if authentication != nil {
 		s.authenticated = e.Group("/api/v1")
 		s.authenticated.Use(adaptHTTPMiddleware(authentication))
@@ -182,10 +183,17 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/leave/requests/:requestId/approve-hr", s.approveLeaveRequestHR)
 		s.api.POST("/leave/requests/:requestId/decline", s.declineLeaveRequest)
 		s.api.POST("/leave/requests/:requestId/cancel", s.cancelLeaveRequest)
+		s.api.PUT("/organization/details", s.updateOrganizationDetails)
+		s.api.POST("/branding/logo", s.uploadBrandingLogo)
+		s.api.PUT("/users/me", s.updateUserProfile)
+		s.api.POST("/users/me/avatar", s.uploadUserAvatar)
+		s.api.GET("/locations", s.listLocations)
+		s.api.POST("/locations", s.createLocation)
 		s.authenticated.POST("/setup/organizations", s.createOrganization)
 		s.authenticated.POST("/auth/provision", s.provisionIdentity)
 		s.authenticated.GET("/setup/status", s.checkSetupStatus)
 	}
+	s.echo.GET("/api/v1/public/assets/*", s.servePublicAsset)
 }
 
 func (s *Server) listDivisions(c echo.Context) error {
@@ -985,24 +993,6 @@ func (s *Server) createOrganization(c echo.Context) error {
 	return c.JSON(http.StatusCreated, result)
 }
 
-func (s *Server) getMe(c echo.Context) error {
-	principal, ok := identity.PrincipalFromContext(c.Request().Context())
-	if !ok {
-		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
-	}
-	permissions := make([]string, 0, len(principal.Permissions))
-	for permission := range principal.Permissions {
-		permissions = append(permissions, permission)
-	}
-	sort.Strings(permissions)
-	return c.JSON(http.StatusOK, map[string]any{
-		"userId":         principal.UserID,
-		"membershipId":   principal.MembershipID,
-		"organizationId": principal.OrganizationID,
-		"permissions":    permissions,
-	})
-}
-
 func (s *Server) readiness(c echo.Context) error {
 	ctx, cancel := context.WithTimeout(c.Request().Context(), 2*time.Second)
 	defer cancel()
@@ -1045,7 +1035,12 @@ func problemHandler(err error, c echo.Context) {
 		_ = problem(c, httpErr.Code, "http.request_failed", http.StatusText(httpErr.Code), message)
 		return
 	}
-	_ = problem(c, http.StatusInternalServerError, "internal.unexpected", "Internal server error", "An unexpected error occurred")
+	slog.Error("unhandled internal server error",
+		"error", err,
+		"path", c.Path(),
+		"method", c.Request().Method,
+	)
+	_ = problem(c, http.StatusInternalServerError, "internal.unexpected", "Internal server error", err.Error())
 }
 
 func (s *Server) getLiveAttendance(c echo.Context) error {

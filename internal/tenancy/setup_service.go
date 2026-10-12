@@ -134,10 +134,15 @@ func (service *SetupService) CreateOrganization(ctx context.Context, externalIde
 			return SetupResult{}, normalizeSetupError(err)
 		}
 	}
+	reqID := requestIDFromContext(ctx)
+	if reqID == "" {
+		reqID = "unknown"
+	}
+	auditMetadata, _ := json.Marshal(map[string]any{"subdomain": result.Subdomain})
 	if _, err := tx.Exec(ctx, `
         INSERT INTO audit_events (organization_id, actor_user_id, action, resource_type, resource_id, request_id, metadata)
-        VALUES ($1, $2, 'organization.created', 'organization', $1, COALESCE($3, 'unknown'), jsonb_build_object('subdomain', $4))`,
-		result.OrganizationID, userID, requestIDFromContext(ctx), result.Subdomain); err != nil {
+        VALUES ($1, $2, 'organization.created', 'organization', $1, $3, $4::jsonb)`,
+		result.OrganizationID, userID, reqID, auditMetadata); err != nil {
 		return SetupResult{}, fmt.Errorf("write setup audit event: %w", err)
 	}
 	resultJSON, err := json.Marshal(result)

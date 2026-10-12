@@ -3,6 +3,7 @@ package documents
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 type Storage interface {
 	UploadURL(ctx context.Context, objectKey, contentType string, sizeBytes int64, expiresIn time.Duration) (string, error)
 	DownloadURL(ctx context.Context, objectKey string, expiresIn time.Duration) (string, error)
+	PutObject(ctx context.Context, objectKey, contentType string, body io.Reader, sizeBytes int64) error
+	GetObject(ctx context.Context, objectKey string) (io.ReadCloser, string, int64, error)
 }
 
 type S3Config struct {
@@ -28,6 +31,7 @@ type S3Config struct {
 
 type S3Storage struct {
 	bucket    string
+	client    *s3.Client
 	presigner *s3.PresignClient
 }
 
@@ -51,7 +55,7 @@ func NewS3Storage(ctx context.Context, input S3Config) (*S3Storage, error) {
 		return nil, fmt.Errorf("load S3 configuration: %w", err)
 	}
 	client := s3.NewFromConfig(cfg, func(options *s3.Options) { options.UsePathStyle = input.UsePathStyle })
-	return &S3Storage{bucket: input.Bucket, presigner: s3.NewPresignClient(client)}, nil
+	return &S3Storage{bucket: input.Bucket, client: client, presigner: s3.NewPresignClient(client)}, nil
 }
 
 func (storage *S3Storage) UploadURL(ctx context.Context, objectKey, contentType string, sizeBytes int64, expiresIn time.Duration) (string, error) {
@@ -76,4 +80,40 @@ func (storage *S3Storage) DownloadURL(ctx context.Context, objectKey string, exp
 		return "", fmt.Errorf("presign document download: %w", err)
 	}
 	return result.URL, nil
+}
+
+func (storage *S3Storage) PutObject(ctx context.Context, objectKey, contentType string, body io.Reader, sizeBytes int64) error {
+	input := &s3.PutObjectInput{
+		Bucket:      aws.String(storage.bucket),
+		Key:         aws.String(objectKey),
+		ContentType: aws.String(contentType),
+		Body:        body,
+	}
+	if sizeBytes > 0 {
+		input.ContentLength = aws.Int64(sizeBytes)
+	}
+	_, err := storage.client.PutObject(ctx, input)
+	if err != nil {
+		return fmt.Errorf("put object to storage: %w", err)
+	}
+	return nil
+}
+
+func (storage *S3Storage) GetObject(ctx context.Context, objectKey string) (io.ReadCloser, string, int64, error) {
+	output, err := storage.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(storage.bucket),
+		Key:    aws.String(objectKey),
+	})
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("get object from storage: %w", err)
+	}
+	contentType := "application/octet-stream"
+	if output.ContentType != nil && *output.ContentType != "" {
+		contentType = *output.ContentType
+	}
+	var size int64
+	if output.ContentLength != nil {
+		size = *output.ContentLength
+	}
+	return output.Body, contentType, size, nil
 }
