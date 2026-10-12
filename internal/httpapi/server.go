@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/easyhr/easyhr-be/internal/auth"
 	"github.com/easyhr/easyhr-be/internal/benefits"
 	"github.com/easyhr/easyhr-be/internal/documents"
+	"github.com/easyhr/easyhr-be/internal/email"
 	"github.com/easyhr/easyhr-be/internal/hiring"
 	"github.com/easyhr/easyhr-be/internal/holidays"
 	"github.com/easyhr/easyhr-be/internal/identity"
@@ -72,6 +74,7 @@ type Server struct {
 	setup         *tenancy.SetupService
 	departments   *tenancy.DepartmentService
 	divisions     *tenancy.DivisionService
+	email         *email.Service
 }
 
 func New(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.Middleware, clerkSecretKey string) *Server {
@@ -97,7 +100,7 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 		MaxAge:           86400,
 	}))
 
-	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), storage: documentStorage, setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), operations: operations.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool)}
+	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), storage: documentStorage, setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), operations: operations.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool), email: email.NewService(os.Getenv("RESEND_API_KEY"), os.Getenv("EMAIL_FROM"), os.Getenv("EMAIL_FROM_NAME"))}
 	if authentication != nil {
 		s.authenticated = e.Group("/api/v1")
 		s.authenticated.Use(adaptHTTPMiddleware(authentication))
@@ -164,7 +167,10 @@ func (s *Server) registerRoutes() {
 		s.api.GET("/divisions", s.listDivisions)
 		s.api.POST("/divisions", s.createDivision)
 		s.api.POST("/employees", s.createEmployee)
+		s.api.GET("/employees/me", s.getMyEmployeeProfile)
+		s.api.PATCH("/employees/me/profile", s.updateMyPersonalProfile)
 		s.api.POST("/employees/:employeeId/activate", s.activateEmployee)
+		s.api.POST("/onboarding/send-invitation", s.sendOnboardingInvitation)
 		s.api.POST("/leave/requests", s.submitLeaveRequest)
 		s.api.GET("/leave/requests", s.listLeaveRequests)
 		s.api.GET("/leave/balances", s.listLeaveBalances)
@@ -941,10 +947,11 @@ func (s *Server) activateEmployee(c echo.Context) error {
 	if !ok {
 		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
 	}
-	if !principal.HasPermission("employees:manage") {
+	employeeID := c.Param("employeeId")
+	isSelf, _ := s.people.IsEmployeeUser(c.Request().Context(), principal.OrganizationID, employeeID, principal.UserID)
+	if !isSelf && !principal.HasPermission("employees:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage employees")
 	}
-	employeeID := c.Param("employeeId")
 	if err := s.people.Activate(c.Request().Context(), principal.OrganizationID, employeeID); err != nil {
 		if errors.Is(err, people.ErrEmployeeNotFound) {
 			return problem(c, http.StatusNotFound, "employee.not_found", "Not found", "Employee not found")
@@ -952,6 +959,131 @@ func (s *Server) activateEmployee(c echo.Context) error {
 		return problem(c, http.StatusInternalServerError, "employee.activation_failed", "Internal error", "Could not activate employee")
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *Server) getMyEmployeeProfile(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+
+	var userEmail string
+	_ = s.pool.QueryRow(c.Request().Context(), "SELECT email FROM users WHERE id = $1", principal.UserID).Scan(&userEmail)
+
+	prof, err := s.people.GetByUserID(c.Request().Context(), principal.OrganizationID, principal.UserID, userEmail)
+	if err == nil {
+		return c.JSON(http.StatusOK, prof)
+	}
+
+	var uFirstName, uLastName, uPhone, uAvatar string
+	_ = s.pool.QueryRow(c.Request().Context(), "SELECT first_name, last_name, COALESCE(phone, ''), COALESCE(avatar_url, '') FROM users WHERE id = $1", principal.UserID).Scan(&uFirstName, &uLastName, &uPhone, &uAvatar)
+
+	var orgName string
+	_ = s.pool.QueryRow(c.Request().Context(), "SELECT name FROM organizations WHERE id = $1", principal.OrganizationID).Scan(&orgName)
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"id":             principal.UserID,
+		"employeeNumber": "EMP-001",
+		"firstName":      uFirstName,
+		"lastName":       uLastName,
+		"workEmail":      userEmail,
+		"personalEmail":  userEmail,
+		"personalPhone":  uPhone,
+		"status":         "onboarding",
+		"department":     "Administration",
+		"location":       "Headquarters",
+		"jobTitle":       "Team Member",
+		"avatar":         uAvatar,
+		"companyName":    orgName,
+	})
+}
+
+func (s *Server) updateMyPersonalProfile(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+
+	var input people.PersonalProfile
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request body", err.Error())
+	}
+
+	var empID string
+	err := s.pool.QueryRow(c.Request().Context(), "SELECT id::text FROM employees WHERE user_id = $1 AND organization_id = $2", principal.UserID, principal.OrganizationID).Scan(&empID)
+	if err != nil {
+		var userEmail string
+		_ = s.pool.QueryRow(c.Request().Context(), "SELECT email FROM users WHERE id = $1", principal.UserID).Scan(&userEmail)
+		_ = s.pool.QueryRow(c.Request().Context(), "SELECT id::text FROM employees WHERE organization_id = $1 AND (LOWER(work_email) = LOWER($2) OR LOWER(id::text) = LOWER($2)) LIMIT 1", principal.OrganizationID, userEmail).Scan(&empID)
+	}
+
+	if empID != "" {
+		if err := s.people.UpdatePersonalProfile(c.Request().Context(), principal.OrganizationID, empID, input); err != nil {
+			return problem(c, http.StatusInternalServerError, "profile.update_failed", "Failed to update profile", err.Error())
+		}
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{"status": "success"})
+}
+
+type SendInvitationRequest struct {
+	EmployeeID  string `json:"employeeId"`
+	Email       string `json:"email"`
+	Name        string `json:"name"`
+	JobTitle    string `json:"jobTitle"`
+	CompanyName string `json:"companyName"`
+	StartDate   string `json:"startDate"`
+	PortalURL   string `json:"portalUrl"`
+}
+
+func (s *Server) sendOnboardingInvitation(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	if !principal.HasPermission("employees:manage") && !principal.HasPermission("onboarding:initiate") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to send onboarding invitations")
+	}
+
+	var req SendInvitationRequest
+	if err := c.Bind(&req); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request body", err.Error())
+	}
+
+	var orgName string
+	_ = s.pool.QueryRow(c.Request().Context(), "SELECT name FROM organizations WHERE id = $1", principal.OrganizationID).Scan(&orgName)
+	if req.CompanyName == "" {
+		req.CompanyName = orgName
+	}
+
+	if req.EmployeeID != "" && (req.Email == "" || req.Name == "") {
+		var fName, lName, wEmail, pEmail, job string
+		_ = s.pool.QueryRow(c.Request().Context(), `
+			SELECT e.first_name, e.last_name, e.work_email, COALESCE(p.personal_email, ''), COALESCE(ea.job_title, '')
+			FROM employees e
+			LEFT JOIN employee_personal_profiles p ON p.employee_id = e.id
+			LEFT JOIN employment_assignments ea ON ea.employee_id = e.id AND ea.effective_to IS NULL
+			WHERE e.id = $1::uuid AND e.organization_id = $2`, req.EmployeeID, principal.OrganizationID).Scan(&fName, &lName, &wEmail, &pEmail, &job)
+		if req.Name == "" {
+			req.Name = strings.TrimSpace(fName + " " + lName)
+		}
+		if req.Email == "" {
+			if pEmail != "" {
+				req.Email = pEmail
+			} else {
+				req.Email = wEmail
+			}
+		}
+		if req.JobTitle == "" {
+			req.JobTitle = job
+		}
+	}
+
+	if err := s.email.SendOnboardingInvitation(c.Request().Context(), req.Email, req.Name, req.JobTitle, req.CompanyName, req.StartDate, req.PortalURL); err != nil {
+		return problem(c, http.StatusInternalServerError, "email.failed", "Failed to send email", err.Error())
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{"sent": true, "recipient": req.Email})
 }
 
 func (s *Server) listEmployees(c echo.Context) error {
