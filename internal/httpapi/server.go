@@ -192,11 +192,21 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/users/me/avatar", s.uploadUserAvatar)
 		s.api.GET("/locations", s.listLocations)
 		s.api.POST("/locations", s.createLocation)
+		// Hiring
+		s.api.GET("/jobs", s.listJobPostings)
+		s.api.POST("/jobs", s.createJobPosting)
+		s.api.PATCH("/jobs/:postingId/status", s.updateJobPostingStatus)
+		s.api.GET("/jobs/:postingId/applicants", s.listJobApplicants)
+		s.api.GET("/hiring/applicants", s.listAllApplicants)
+		s.api.PATCH("/hiring/applicants/:applicantId/status", s.updateApplicantStatus)
+		s.api.POST("/hiring/applicants/:applicantId/offer", s.createJobOffer)
 		s.authenticated.POST("/setup/organizations", s.createOrganization)
 		s.authenticated.POST("/auth/provision", s.provisionIdentity)
 		s.authenticated.GET("/setup/status", s.checkSetupStatus)
 	}
 	s.echo.GET("/api/v1/public/assets/*", s.servePublicAsset)
+	s.echo.GET("/api/v1/public/jobs", s.listPublicJobs)
+	s.echo.POST("/api/v1/public/jobs/:postingId/apply", s.applyForJob)
 }
 
 func (s *Server) listDivisions(c echo.Context) error {
@@ -1399,6 +1409,86 @@ func (s *Server) createJobOffer(c echo.Context) error {
 			return problem(c, http.StatusNotFound, "hiring.applicant_not_found", "Not found", "Applicant not found")
 		}
 		return problem(c, http.StatusInternalServerError, "hiring.create_offer_failed", "Internal server error", "Could not create job offer")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) updateJobPostingStatus(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !principal.HasPermission("hiring:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage job postings")
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request", err.Error())
+	}
+	if err := s.hiring.UpdatePostingStatus(c.Request().Context(), principal.OrganizationID, c.Param("postingId"), body.Status); err != nil {
+		if errors.Is(err, hiring.ErrNotFound) {
+			return problem(c, http.StatusNotFound, "hiring.posting_not_found", "Not found", "Job posting not found")
+		}
+		return problem(c, http.StatusUnprocessableEntity, "hiring.invalid_status", "Invalid status", err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *Server) listJobApplicants(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !principal.HasPermission("hiring:read") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view applicants")
+	}
+	result, err := s.hiring.ListApplicants(c.Request().Context(), principal.OrganizationID, c.Param("postingId"))
+	if err != nil {
+		if errors.Is(err, hiring.ErrNotFound) {
+			return problem(c, http.StatusNotFound, "hiring.posting_not_found", "Not found", "Job posting not found")
+		}
+		return problem(c, http.StatusInternalServerError, "hiring.list_applicants_failed", "Internal server error", "Could not load applicants")
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": result})
+}
+
+func (s *Server) listAllApplicants(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !principal.HasPermission("hiring:read") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view applicants")
+	}
+	result, err := s.hiring.ListAllApplicants(c.Request().Context(), principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "hiring.list_all_applicants_failed", "Internal server error", "Could not load applicants")
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": result})
+}
+
+func (s *Server) updateApplicantStatus(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !principal.HasPermission("hiring:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage applicants")
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request", err.Error())
+	}
+	result, err := s.hiring.UpdateApplicantStatus(c.Request().Context(), principal.OrganizationID, c.Param("applicantId"), body.Status)
+	if err != nil {
+		if errors.Is(err, hiring.ErrNotFound) {
+			return problem(c, http.StatusNotFound, "hiring.applicant_not_found", "Not found", "Applicant not found")
+		}
+		return problem(c, http.StatusUnprocessableEntity, "hiring.invalid_status", "Invalid status", err.Error())
 	}
 	return c.JSON(http.StatusOK, result)
 }
