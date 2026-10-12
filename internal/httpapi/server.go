@@ -1051,8 +1051,14 @@ func (s *Server) sendOnboardingInvitation(c echo.Context) error {
 		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request body", err.Error())
 	}
 
-	var orgName string
-	_ = s.pool.QueryRow(c.Request().Context(), "SELECT name FROM organizations WHERE id = $1", principal.OrganizationID).Scan(&orgName)
+	var orgName, logoURL, brandColor, websiteURL string
+	_ = s.pool.QueryRow(c.Request().Context(), `
+		SELECT o.name, COALESCE(w.logo_url, ''), COALESCE(w.brand_color, '#4F46E5'), COALESCE(lp.website_url, '')
+		FROM organizations o
+		LEFT JOIN workspaces w ON w.organization_id = o.id
+		LEFT JOIN organization_legal_profiles lp ON lp.organization_id = o.id
+		WHERE o.id = $1`, principal.OrganizationID).Scan(&orgName, &logoURL, &brandColor, &websiteURL)
+
 	if req.CompanyName == "" {
 		req.CompanyName = orgName
 	}
@@ -1080,7 +1086,14 @@ func (s *Server) sendOnboardingInvitation(c echo.Context) error {
 		}
 	}
 
-	if err := s.email.SendOnboardingInvitation(c.Request().Context(), req.Email, req.Name, req.JobTitle, req.CompanyName, req.StartDate, req.PortalURL); err != nil {
+	branding := email.BrandingInfo{
+		CompanyName: req.CompanyName,
+		LogoURL:     logoURL,
+		BrandColor:  brandColor,
+		WebsiteURL:  websiteURL,
+	}
+
+	if err := s.email.SendOnboardingInvitationWithBranding(c.Request().Context(), req.Email, req.Name, req.JobTitle, req.StartDate, req.PortalURL, branding); err != nil {
 		return problem(c, http.StatusInternalServerError, "email.failed", "Failed to send email", err.Error())
 	}
 
@@ -1218,6 +1231,33 @@ func (s *Server) createOrganization(c echo.Context) error {
 			return err
 		}
 	}
+
+	// Dispatch welcoming email to organization creator
+	go func() {
+		var userEmail, userFirstName string
+		_ = s.pool.QueryRow(context.Background(), `
+			SELECT email, first_name
+			FROM users WHERE clerk_user_id = $1 OR id::text = $1`, claims.Subject).Scan(&userEmail, &userFirstName)
+		if userEmail != "" {
+			ownerDisplayName := userFirstName
+			if ownerDisplayName == "" {
+				ownerDisplayName = "Founder"
+			}
+			orgName := input.DisplayName
+			if orgName == "" {
+				orgName = input.LegalName
+			}
+			_ = s.email.SendWelcomeOrganizationCreator(
+				context.Background(),
+				userEmail,
+				ownerDisplayName,
+				orgName,
+				input.Subdomain,
+				"http://localhost:3000/dashboard",
+			)
+		}
+	}()
+
 	return c.JSON(http.StatusCreated, result)
 }
 
