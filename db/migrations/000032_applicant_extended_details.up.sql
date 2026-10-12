@@ -1,0 +1,7 @@
+ALTER TABLE job_applicants
+ADD COLUMN IF NOT EXISTS current_location TEXT,
+ADD COLUMN IF NOT EXISTS expected_salary_gross BIGINT,
+ADD COLUMN IF NOT EXISTS currency TEXT DEFAULT 'USD',
+ADD COLUMN IF NOT EXISTS notice_period TEXT,
+ADD COLUMN IF NOT EXISTS linkedin_url TEXT,
+ADD COLUMN IF NOT EXISTS portfolio_url TEXT;

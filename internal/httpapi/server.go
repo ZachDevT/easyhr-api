@@ -1,12 +1,15 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -215,6 +218,7 @@ func (s *Server) registerRoutes() {
 	s.echo.GET("/api/v1/public/assets/*", s.servePublicAsset)
 	s.echo.GET("/api/v1/public/jobs", s.listPublicJobs)
 	s.echo.GET("/api/v1/public/company", s.getPublicCompany)
+	s.echo.POST("/api/v1/public/upload-resume", s.uploadPublicResume)
 	s.echo.POST("/api/v1/public/jobs/:postingId/apply", s.applyForJob)
 }
 
@@ -1586,6 +1590,50 @@ func (s *Server) getPublicCompany(c echo.Context) error {
 		"brandColor": brandColor,
 		"industry":   industry,
 		"websiteUrl": websiteURL,
+	})
+}
+
+func (s *Server) uploadPublicResume(c echo.Context) error {
+	file, err := c.FormFile("resume")
+	if err != nil {
+		file, err = c.FormFile("file")
+	}
+	if err != nil {
+		return problem(c, http.StatusBadRequest, "upload.missing_file", "Missing file", "Please select a resume or CV file to upload")
+	}
+
+	src, err := file.Open()
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "upload.open_failed", "Upload failed", err.Error())
+	}
+	defer src.Close()
+
+	buf, err := io.ReadAll(src)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "upload.read_failed", "Upload failed", err.Error())
+	}
+
+	contentType := file.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = http.DetectContentType(buf)
+	}
+
+	ext := strings.TrimPrefix(path.Ext(file.Filename), ".")
+	if ext == "" {
+		ext = "pdf"
+	}
+
+	key := fmt.Sprintf("resumes/public_%d_%s", time.Now().UnixNano(), file.Filename)
+	if s.storage != nil {
+		_ = s.storage.PutObject(c.Request().Context(), key, contentType, bytes.NewReader(buf), int64(len(buf)))
+	}
+
+	publicURL := fmt.Sprintf("http://localhost:8080/api/v1/public/assets/%s", key)
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"resumeUrl":      publicURL,
+		"resumeFilename": file.Filename,
+		"key":            key,
 	})
 }
 

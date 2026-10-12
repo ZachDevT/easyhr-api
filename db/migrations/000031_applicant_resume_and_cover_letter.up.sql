@@ -1,0 +1,4 @@
+ALTER TABLE job_applicants
+ADD COLUMN IF NOT EXISTS resume_url TEXT,
+ADD COLUMN IF NOT EXISTS resume_filename TEXT,
+ADD COLUMN IF NOT EXISTS cover_letter TEXT;
