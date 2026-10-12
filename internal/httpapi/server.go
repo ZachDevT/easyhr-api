@@ -892,7 +892,9 @@ func (s *Server) provisionIdentity(c echo.Context) error {
 	if !ok || claims == nil || claims.Subject == "" {
 		return problem(c, http.StatusUnauthorized, "auth.missing_token", "Unauthorized", "A verified session is required")
 	}
-	if err := s.provisioner.Provision(c.Request().Context(), claims.Subject); err != nil {
+	var input identity.ProvisionInput
+	_ = c.Bind(&input)
+	if err := s.provisioner.ProvisionWithInput(c.Request().Context(), claims.Subject, input); err != nil {
 		switch {
 		case errors.Is(err, identity.ErrIdentityProfileIncomplete):
 			return problem(c, http.StatusConflict, "identity.profile_incomplete", "Account profile incomplete", "A verified primary email, first name, and last name are required")

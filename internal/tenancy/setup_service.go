@@ -61,9 +61,21 @@ func (service *SetupService) CreateOrganization(ctx context.Context, externalIde
 	var userID string
 	if err := tx.QueryRow(ctx, `SELECT id::text FROM users WHERE external_identity_id = $1`, externalIdentityID).Scan(&userID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return SetupResult{}, ErrSetupUserNotProvisioned
+			userEmail := input.ContactEmail
+			if userEmail == "" {
+				userEmail = fmt.Sprintf("owner_%s@easyhr.app", externalIdentityID)
+			}
+			err = tx.QueryRow(ctx, `
+				INSERT INTO users (external_identity_id, email, first_name, last_name)
+				VALUES ($1, $2, 'Company', 'Owner')
+				ON CONFLICT (external_identity_id) DO UPDATE SET updated_at = now()
+				RETURNING id::text`, externalIdentityID, userEmail).Scan(&userID)
+			if err != nil {
+				return SetupResult{}, fmt.Errorf("auto-provision setup user: %w", err)
+			}
+		} else {
+			return SetupResult{}, fmt.Errorf("find setup user: %w", err)
 		}
-		return SetupResult{}, fmt.Errorf("find setup user: %w", err)
 	}
 
 	result := SetupResult{Subdomain: input.Subdomain}
