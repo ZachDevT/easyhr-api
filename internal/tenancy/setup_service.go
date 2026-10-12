@@ -115,7 +115,12 @@ func (service *SetupService) CreateOrganization(ctx context.Context, externalIde
 		return SetupResult{}, normalizeSetupError(err)
 	}
 	for _, department := range input.InitialDepartments {
-		if _, err := tx.Exec(ctx, `INSERT INTO departments (organization_id, name) VALUES ($1, $2)`, result.OrganizationID, strings.TrimSpace(department)); err != nil {
+		deptName := strings.TrimSpace(department)
+		deptCode := strings.ToUpper(strings.ReplaceAll(deptName, " ", "_"))
+		if len(deptCode) > 20 {
+			deptCode = deptCode[:20]
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO departments (organization_id, name, code) VALUES ($1, $2, $3)`, result.OrganizationID, deptName, deptCode); err != nil {
 			return SetupResult{}, normalizeSetupError(err)
 		}
 	}
