@@ -15,6 +15,56 @@ var (
 	currencyPattern   = regexp.MustCompile(`^[A-Z]{3}$`)
 )
 
+var reservedSubdomains = map[string]struct{}{
+	"api":       {},
+	"app":       {},
+	"admin":     {},
+	"auth":      {},
+	"billing":   {},
+	"dashboard": {},
+	"docs":      {},
+	"mail":      {},
+	"support":   {},
+	"www":       {},
+	"staging":   {},
+	"dev":       {},
+	"test":      {},
+	"demo":      {},
+	"clerk":     {},
+	"careers":   {},
+	"pricing":   {},
+	"login":     {},
+	"signup":    {},
+	"portal":    {},
+	"status":    {},
+	"root":      {},
+	"easyhr":    {},
+	"system":    {},
+}
+
+// IsReservedSubdomain checks if a subdomain is reserved by the platform.
+func IsReservedSubdomain(subdomain string) bool {
+	clean := strings.ToLower(strings.TrimSpace(subdomain))
+	_, exists := reservedSubdomains[clean]
+	return exists
+}
+
+// Slugify converts an arbitrary string into a URL-safe, lowercase alphanumeric slug with hyphens.
+func Slugify(text string) string {
+	text = strings.ToLower(strings.TrimSpace(text))
+	reg := regexp.MustCompile(`[^a-z0-9]+`)
+	slug := reg.ReplaceAllString(text, "-")
+	slug = strings.Trim(slug, "-")
+	if len(slug) > 63 {
+		slug = slug[:63]
+		slug = strings.Trim(slug, "-")
+	}
+	if slug == "" {
+		slug = "workspace"
+	}
+	return slug
+}
+
 var supportedRegistrationCountries = map[string]struct{}{
 	"UG": {}, "KE": {}, "RW": {}, "TZ": {}, "US": {}, "GB": {},
 }
@@ -92,6 +142,9 @@ func (input OrganizationSetupInput) Validate() error {
 	}
 	if !subdomainPattern.MatchString(input.Subdomain) {
 		return fmt.Errorf("subdomain must be 1-63 lowercase letters, numbers, or internal hyphens")
+	}
+	if IsReservedSubdomain(input.Subdomain) {
+		return fmt.Errorf("subdomain %q is reserved and cannot be claimed", input.Subdomain)
 	}
 	if !brandColorPattern.MatchString(input.BrandColor) {
 		return fmt.Errorf("brandColor must be a #RRGGBB color")

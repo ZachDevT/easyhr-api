@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/clerk/clerk-sdk-go/v2"
@@ -43,11 +44,13 @@ func NewResolver(pool *pgxpool.Pool) *Resolver {
 }
 
 // Middleware resolves a verified Clerk identity to exactly one active EasyHR
-// membership. The workspace is sent by the client only as a selector; the
-// server looks it up and rejects it unless the identity has an active local
-// membership. In production the same selector should be derived from a
-// verified workspace host; the explicit header keeps local development and
-// the current separate frontend deployments workable.
+// membership. The workspace is determined from:
+// 1. Explicit X-EasyHR-Workspace request header
+// 2. Origin or Referer host headers (e.g. acme.easyhr.pro or acme.localhost:3000)
+// 3. Host header
+// 4. Default user membership lookup if not specified on apex/generic domain
+// In all cases, the server strictly validates that the authenticated identity
+// has an ACTIVE membership in that workspace in PostgreSQL before granting access.
 func (resolver *Resolver) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		claims, ok := clerk.SessionClaimsFromContext(request.Context())
@@ -56,7 +59,7 @@ func (resolver *Resolver) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		workspace := strings.TrimSpace(request.Header.Get("X-EasyHR-Workspace"))
+		workspace := extractWorkspaceFromRequest(request)
 		if workspace == "" {
 			err := resolver.pool.QueryRow(request.Context(), `
 				SELECT w.subdomain
@@ -83,6 +86,74 @@ func (resolver *Resolver) Middleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(writer, request.WithContext(WithPrincipal(request.Context(), principal)))
 	})
+}
+
+var reservedSubdomainsList = map[string]bool{
+	"api": true, "app": true, "admin": true, "auth": true, "billing": true,
+	"dashboard": true, "docs": true, "mail": true, "support": true, "www": true,
+	"staging": true, "dev": true, "test": true, "demo": true, "clerk": true,
+}
+
+func extractWorkspaceFromRequest(request *http.Request) string {
+	if ws := strings.TrimSpace(request.Header.Get("X-EasyHR-Workspace")); ws != "" {
+		clean := strings.ToLower(ws)
+		if !reservedSubdomainsList[clean] {
+			return clean
+		}
+	}
+	if origin := request.Header.Get("Origin"); origin != "" {
+		if ws := extractSubdomainFromURL(origin); ws != "" {
+			return ws
+		}
+	}
+	if referer := request.Header.Get("Referer"); referer != "" {
+		if ws := extractSubdomainFromURL(referer); ws != "" {
+			return ws
+		}
+	}
+	if ws := extractSubdomainFromHost(request.Host); ws != "" {
+		return ws
+	}
+	return ""
+}
+
+func extractSubdomainFromURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return extractSubdomainFromHost(parsed.Host)
+}
+
+func extractSubdomainFromHost(host string) string {
+	if idx := strings.Index(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
+	host = strings.ToLower(strings.TrimSpace(host))
+
+	// Production: <subdomain>.easyhr.pro
+	if strings.HasSuffix(host, ".easyhr.pro") {
+		sub := strings.TrimSuffix(host, ".easyhr.pro")
+		if idx := strings.LastIndex(sub, "."); idx != -1 {
+			sub = sub[idx+1:]
+		}
+		if sub != "" && !reservedSubdomainsList[sub] {
+			return sub
+		}
+	}
+
+	// Local development: <subdomain>.localhost
+	if strings.HasSuffix(host, ".localhost") {
+		sub := strings.TrimSuffix(host, ".localhost")
+		if idx := strings.LastIndex(sub, "."); idx != -1 {
+			sub = sub[idx+1:]
+		}
+		if sub != "" && !reservedSubdomainsList[sub] {
+			return sub
+		}
+	}
+
+	return ""
 }
 
 var errMembershipNotFound = fmt.Errorf("active membership not found")

@@ -42,6 +42,11 @@ func TestOrganizationSetupValidationRejectsUnsafeWorkspaceAndGeofenceValues(t *t
 		{"unsupported country", func(input *OrganizationSetupInput) { input.CountryCode = "ZZ" }},
 		{"bad geofence", func(input *OrganizationSetupInput) { input.Headquarters.Geofence.Latitude = 99 }},
 		{"duplicate departments", func(input *OrganizationSetupInput) { input.InitialDepartments = []string{"People", "people"} }},
+		{"reserved api subdomain", func(input *OrganizationSetupInput) { input.Subdomain = "api" }},
+		{"reserved app subdomain", func(input *OrganizationSetupInput) { input.Subdomain = "app" }},
+		{"reserved admin subdomain", func(input *OrganizationSetupInput) { input.Subdomain = "admin" }},
+		{"reserved www subdomain", func(input *OrganizationSetupInput) { input.Subdomain = "www" }},
+		{"reserved clerk subdomain", func(input *OrganizationSetupInput) { input.Subdomain = "clerk" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -51,5 +56,24 @@ func TestOrganizationSetupValidationRejectsUnsafeWorkspaceAndGeofenceValues(t *t
 				t.Fatal("Validate() error = nil, want validation error")
 			}
 		})
+	}
+}
+
+func TestSlugify(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{"Acacia Labs", "acacia-labs"},
+		{"Acme & Sons Ltd.", "acme-sons-ltd"},
+		{"---hello---world---", "hello-world"},
+		{"   ", "workspace"},
+		{"Uganda HR Pro 2026", "uganda-hr-pro-2026"},
+	}
+	for _, c := range cases {
+		got := Slugify(c.input)
+		if got != c.expected {
+			t.Errorf("Slugify(%q) = %q, want %q", c.input, got, c.expected)
+		}
 	}
 }

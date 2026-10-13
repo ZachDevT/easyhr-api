@@ -1457,13 +1457,14 @@ func (s *Server) createOrganization(c echo.Context) error {
 			if orgName == "" {
 				orgName = input.LegalName
 			}
+			targetDashboard := fmt.Sprintf("https://%s.easyhr.pro/dashboard", result.Subdomain)
 			_ = s.email.SendWelcomeOrganizationCreator(
 				context.Background(),
 				userEmail,
 				ownerDisplayName,
 				orgName,
-				input.Subdomain,
-				"http://localhost:3000/dashboard",
+				result.Subdomain,
+				targetDashboard,
 			)
 		}
 	}()
@@ -1995,7 +1996,202 @@ func (s *Server) updateApplicantStatus(c echo.Context) error {
 		}
 		return problem(c, http.StatusUnprocessableEntity, "hiring.invalid_status", "Invalid status", err.Error())
 	}
+
+	// BambooHR-style automation: When candidate is marked as "hired", automatically:
+	// 1. Create/link them as an Employee in the directory (status: 'onboarding')
+	// 2. Provision their workspace user/membership with default employee role
+	// 3. Initiate an onboarding instance with initial tasks
+	// 4. Send a branded candidate welcome & self-onboarding email with their direct workspace link
+	if strings.ToLower(body.Status) == "hired" {
+		go func(applicant hiring.JobApplicant, orgID, actorID string) {
+			empID, convErr := s.convertHiredApplicantToEmployee(context.Background(), orgID, actorID, applicant)
+			if convErr != nil {
+				slog.Error("failed to convert hired applicant to employee", "error", convErr, "applicantId", applicant.ID)
+				return
+			}
+			slog.Info("hired applicant converted to employee successfully", "employeeId", empID, "applicantId", applicant.ID)
+
+			// Fetch company and workspace details for the welcome email
+			var subdomain, brandColor, logoURL, orgName string
+			_ = s.pool.QueryRow(context.Background(), `
+				SELECT COALESCE(w.subdomain, ''), COALESCE(w.brand_color, '#A238FF'), COALESCE(w.logo_url, ''), o.name
+				FROM organizations o
+				LEFT JOIN workspaces w ON w.organization_id = o.id
+				WHERE o.id = $1`, orgID).Scan(&subdomain, &brandColor, &logoURL, &orgName)
+
+			portalURL := fmt.Sprintf("https://%s.easyhr.pro/my-onboarding", subdomain)
+			if subdomain == "" {
+				portalURL = "https://easyhr.pro/my-onboarding"
+			}
+
+			if applicant.Email != "" {
+				_ = s.email.SendOnboardingInvitationWithBranding(
+					context.Background(),
+					applicant.Email,
+					applicant.FirstName+" "+applicant.LastName,
+					applicant.JobTitle,
+					time.Now().Format("Jan 02, 2006"),
+					portalURL,
+					email.BrandingInfo{
+						CompanyName: orgName,
+						BrandColor:  brandColor,
+						LogoURL:     logoURL,
+					},
+				)
+			}
+		}(result, principal.OrganizationID, principal.UserID)
+	}
+
 	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) convertHiredApplicantToEmployee(ctx context.Context, orgID, actorUserID string, applicant hiring.JobApplicant) (string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// 1. Check if employee with work_email already exists in this organization
+	var existingEmployeeID string
+	err = tx.QueryRow(ctx, `
+		SELECT id::text FROM employees
+		WHERE organization_id = $1 AND lower(work_email) = lower($2)`,
+		orgID, applicant.Email).Scan(&existingEmployeeID)
+
+	employeeID := existingEmployeeID
+	if errors.Is(err, pgx.ErrNoRows) {
+		var empCount int
+		_ = tx.QueryRow(ctx, `SELECT count(*) FROM employees WHERE organization_id = $1`, orgID).Scan(&empCount)
+		empNumber := fmt.Sprintf("EMP-%04d", empCount+1)
+
+		err = tx.QueryRow(ctx, `
+			INSERT INTO employees (organization_id, employee_number, first_name, last_name, work_email, status, hired_on)
+			VALUES ($1, $2, $3, $4, $5, 'onboarding', CURRENT_DATE)
+			RETURNING id::text`,
+			orgID, empNumber, applicant.FirstName, applicant.LastName, applicant.Email).Scan(&employeeID)
+		if err != nil {
+			return "", fmt.Errorf("create employee: %w", err)
+		}
+
+		if applicant.Phone != nil && *applicant.Phone != "" {
+			_, _ = tx.Exec(ctx, `
+				INSERT INTO employee_personal_profiles (employee_id, personal_email, personal_phone)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (employee_id) DO UPDATE SET personal_phone = $3`,
+				employeeID, applicant.Email, *applicant.Phone)
+		}
+
+		_, _ = tx.Exec(ctx, `
+			INSERT INTO employment_terms (employee_id, effective_from, employment_type, worker_type, work_arrangement, fte_basis_points, pay_type, created_by_user_id)
+			VALUES ($1, CURRENT_DATE, 'full_time', 'employee', 'on_site', 10000, 'salary', $2)`,
+			employeeID, actorUserID)
+
+		_, _ = tx.Exec(ctx, `
+			INSERT INTO employment_assignments (employee_id, job_title, effective_from, created_by_user_id)
+			VALUES ($1, $2, CURRENT_DATE, $3)`,
+			employeeID, applicant.JobTitle, actorUserID)
+	}
+
+	// 2. Ensure user and active membership exist
+	var userID string
+	err = tx.QueryRow(ctx, `
+		SELECT id::text FROM users WHERE lower(email) = lower($1)`, applicant.Email).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		clerkID := fmt.Sprintf("candidate_%s", applicant.ID)
+		err = tx.QueryRow(ctx, `
+			INSERT INTO users (external_identity_id, email, first_name, last_name)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (lower(email)) DO UPDATE SET updated_at = now()
+			RETURNING id::text`,
+			clerkID, applicant.Email, applicant.FirstName, applicant.LastName).Scan(&userID)
+		if err != nil {
+			_ = tx.QueryRow(ctx, `SELECT id::text FROM users WHERE lower(email) = lower($1)`, applicant.Email).Scan(&userID)
+		}
+	}
+
+	if userID != "" {
+		var membershipID string
+		err = tx.QueryRow(ctx, `
+			INSERT INTO memberships (organization_id, user_id, status)
+			VALUES ($1, $2, 'active')
+			ON CONFLICT (organization_id, user_id) DO UPDATE SET status = 'active'
+			RETURNING id::text`, orgID, userID).Scan(&membershipID)
+		if err == nil && membershipID != "" {
+			var employeeRoleID string
+			_ = tx.QueryRow(ctx, `
+				SELECT id::text FROM roles WHERE organization_id = $1 AND key = 'employee'`, orgID).Scan(&employeeRoleID)
+			if employeeRoleID != "" {
+				_, _ = tx.Exec(ctx, `
+					INSERT INTO membership_roles (membership_id, role_id)
+					VALUES ($1, $2)
+					ON CONFLICT DO NOTHING`, membershipID, employeeRoleID)
+			}
+		}
+	}
+
+	// 3. Ensure onboarding instance & default tasks exist
+	var instanceID string
+	err = tx.QueryRow(ctx, `
+		SELECT id::text FROM onboarding_instances
+		WHERE employee_id = $1 AND organization_id = $2
+		LIMIT 1`, employeeID, orgID).Scan(&instanceID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var templateID string
+		var templateVersion int
+		_ = tx.QueryRow(ctx, `
+			SELECT id::text, version FROM onboarding_templates
+			WHERE organization_id = $1 AND status = 'published'
+			ORDER BY created_at DESC LIMIT 1`, orgID).Scan(&templateID, &templateVersion)
+
+		if templateID == "" {
+			_ = tx.QueryRow(ctx, `
+				INSERT INTO onboarding_templates (organization_id, name, version, status, created_by_user_id)
+				VALUES ($1, 'General Employee Onboarding', 1, 'published', $2)
+				RETURNING id::text`, orgID, actorUserID).Scan(&templateID)
+			templateVersion = 1
+
+			defaultTasks := []struct {
+				title    string
+				category string
+				order    int
+			}{
+				{"Complete personal profile & emergency contact", "hr", 1},
+				{"Upload National ID or Passport document", "documents", 2},
+				{"Review employee handbook & workplace guidelines", "hr", 3},
+				{"Confirm direct deposit bank details", "documents", 4},
+				{"First day check-in with department manager", "training", 5},
+			}
+			for _, t := range defaultTasks {
+				_, _ = tx.Exec(ctx, `
+					INSERT INTO onboarding_template_tasks (template_id, title, category, assignee_type, sort_order)
+					VALUES ($1, $2, $3, 'employee', $4)
+					ON CONFLICT DO NOTHING`, templateID, t.title, t.category, t.order)
+			}
+		}
+
+		if templateID != "" {
+			err = tx.QueryRow(ctx, `
+				INSERT INTO onboarding_instances (organization_id, employee_id, template_id, template_version, start_date, status, initiated_by_user_id)
+				VALUES ($1, $2, $3, $4, CURRENT_DATE, 'on_track', $5)
+				ON CONFLICT (employee_id, template_id, start_date) DO UPDATE SET status = 'on_track'
+				RETURNING id::text`, orgID, employeeID, templateID, templateVersion, actorUserID).Scan(&instanceID)
+
+			if err == nil && instanceID != "" {
+				_, _ = tx.Exec(ctx, `
+					INSERT INTO onboarding_tasks (onboarding_instance_id, source_template_task_id, title, description, category, assignee_type, due_date, sort_order)
+					SELECT $1, id, title, description, category, assignee_type, CURRENT_DATE + (due_offset_days || ' days')::interval, sort_order
+					FROM onboarding_template_tasks
+					WHERE template_id = $2
+					ON CONFLICT DO NOTHING`, instanceID, templateID)
+			}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return employeeID, nil
 }
 
 func (s *Server) listPerformanceGoals(c echo.Context) error {

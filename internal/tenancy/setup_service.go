@@ -20,6 +20,7 @@ type SetupResult struct {
 	WorkspaceID    string `json:"workspaceId"`
 	MembershipID   string `json:"membershipId"`
 	Subdomain      string `json:"subdomain"`
+	WorkspaceURL   string `json:"workspaceUrl"`
 }
 
 var (
@@ -78,7 +79,10 @@ func (service *SetupService) CreateOrganization(ctx context.Context, externalIde
 		}
 	}
 
-	result := SetupResult{Subdomain: input.Subdomain}
+	result := SetupResult{
+		Subdomain:    input.Subdomain,
+		WorkspaceURL: fmt.Sprintf("https://%s.easyhr.pro", input.Subdomain),
+	}
 	if err := tx.QueryRow(ctx, `
         INSERT INTO organizations (name, country_code, timezone)
         VALUES ($1, $2, $3)
@@ -126,6 +130,26 @@ func (service *SetupService) CreateOrganization(ctx context.Context, externalIde
 	if _, err := tx.Exec(ctx, `INSERT INTO membership_roles (membership_id, role_id) VALUES ($1, $2)`, result.MembershipID, ownerRoleID); err != nil {
 		return SetupResult{}, normalizeSetupError(err)
 	}
+
+	// Seed default workspace roles (employee, hr_manager)
+	var employeeRoleID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO roles (organization_id, key, display_name, is_system)
+		VALUES ($1, 'employee', 'Employee', true)
+		ON CONFLICT (organization_id, key) DO UPDATE SET is_system = true
+		RETURNING id::text`, result.OrganizationID).Scan(&employeeRoleID); err == nil {
+		_, _ = tx.Exec(ctx, `
+			INSERT INTO role_permissions (role_id, permission_key)
+			VALUES ($1, 'organization:read'), ($1, 'employees:read')
+			ON CONFLICT DO NOTHING`, employeeRoleID)
+	}
+
+	var hrRoleID string
+	_ = tx.QueryRow(ctx, `
+		INSERT INTO roles (organization_id, key, display_name, is_system)
+		VALUES ($1, 'hr_manager', 'HR Manager', true)
+		ON CONFLICT (organization_id, key) DO UPDATE SET is_system = true
+		RETURNING id::text`, result.OrganizationID).Scan(&hrRoleID)
 	for _, department := range input.InitialDepartments {
 		deptName := strings.TrimSpace(department)
 		deptCode := strings.ToUpper(strings.ReplaceAll(deptName, " ", "_"))
