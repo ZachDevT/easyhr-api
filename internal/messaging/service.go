@@ -341,6 +341,32 @@ func (s *Service) ProcessInboundEmail(ctx context.Context, input ProcessInboundI
 		}
 	}
 
+	// Deduplication: If this exact Resend email event was already processed, return existing message
+	if input.ResendEmailID != "" {
+		var existingMsgID, existingThreadID, existingOrgID, existingType, existingName, existingSender, existingRecipient, existingSub, existingBody string
+		var existingCreated time.Time
+		errExists := s.pool.QueryRow(ctx, `
+			SELECT id::text, thread_id::text, organization_id::text, sender_type, sender_name, sender_email, recipient_email, subject, body_html, created_at
+			FROM candidate_email_messages
+			WHERE resend_id = $1
+			LIMIT 1
+		`, input.ResendEmailID).Scan(&existingMsgID, &existingThreadID, &existingOrgID, &existingType, &existingName, &existingSender, &existingRecipient, &existingSub, &existingBody, &existingCreated)
+		if errExists == nil && existingMsgID != "" {
+			return EmailMessage{
+				ID:             existingMsgID,
+				ThreadID:       existingThreadID,
+				OrganizationID: existingOrgID,
+				SenderType:     existingType,
+				SenderName:     existingName,
+				SenderEmail:    existingSender,
+				RecipientEmail: existingRecipient,
+				Subject:        existingSub,
+				BodyHTML:       existingBody,
+				CreatedAt:      existingCreated,
+			}, nil
+		}
+	}
+
 	var thread EmailThread
 	var matchedOrgID string
 	matched := false
@@ -376,14 +402,15 @@ func (s *Service) ProcessInboundEmail(ctx context.Context, input ProcessInboundI
 		}
 	}
 
-	// Strategy 3: Match against job_applicants table
+	// Strategy 3: Match against job_applicants table joined with job_postings for organization_id
 	if !matched && senderEmail != "" {
 		var appID, orgID, appName, appEmail string
 		err := s.pool.QueryRow(ctx, `
-			SELECT id::text, organization_id::text, full_name, email
-			FROM job_applicants
-			WHERE LOWER(email) = LOWER($1)
-			ORDER BY created_at DESC
+			SELECT a.id::text, p.organization_id::text, TRIM(a.first_name || ' ' || a.last_name), a.email
+			FROM job_applicants a
+			JOIN job_postings p ON p.id = a.job_posting_id
+			WHERE LOWER(a.email) = LOWER($1)
+			ORDER BY a.created_at DESC
 			LIMIT 1
 		`, senderEmail).Scan(&appID, &orgID, &appName, &appEmail)
 		if err == nil && appID != "" {
