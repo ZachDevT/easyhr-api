@@ -11,6 +11,8 @@ import (
 var ErrEmployeeNotFound = errors.New("employee not found")
 
 type PersonalProfile struct {
+	FirstName                  *string `json:"firstName,omitempty"`
+	LastName                   *string `json:"lastName,omitempty"`
 	PersonalEmail              *string `json:"personalEmail"`
 	PersonalPhone              *string `json:"personalPhone"`
 	BirthDate                  *string `json:"birthDate"`
@@ -34,6 +36,9 @@ type PersonalProfile struct {
 	BankName                   *string `json:"bankName"`
 	BankRoutingNumber          *string `json:"bankRoutingNumber"`
 	BankAccountNumber          *string `json:"bankAccountNumber"`
+	MobileMoneyProvider        *string `json:"mobileMoneyProvider"`
+	MobileMoneyPhone           *string `json:"mobileMoneyPhone"`
+	WalletEmail                *string `json:"walletEmail"`
 	HandbookSignedAt           *string `json:"handbookSignedAt"`
 }
 
@@ -82,6 +87,9 @@ type EmployeeProfile struct {
 	BankName                   *string `json:"bankName"`
 	BankRoutingNumber          *string `json:"bankRoutingNumber"`
 	BankAccountNumber          *string `json:"bankAccountNumber"`
+	MobileMoneyProvider        *string `json:"mobileMoneyProvider"`
+	MobileMoneyPhone           *string `json:"mobileMoneyPhone"`
+	WalletEmail                *string `json:"walletEmail"`
 	HandbookSignedAt           *string `json:"handbookSignedAt"`
 }
 
@@ -120,6 +128,9 @@ const employeeProfileSelectSQL = `
 		profile.bank_name,
 		profile.bank_routing_number,
 		profile.bank_account_number,
+		profile.mobile_money_provider,
+		profile.mobile_money_phone,
+		profile.wallet_email,
 		profile.handbook_signed_at::text,
 		profile.birth_date::text,
 		profile.bio,
@@ -181,6 +192,9 @@ func (directory *Directory) scanEmployeeProfile(row pgx.Row) (EmployeeProfile, e
 		&result.BankName,
 		&result.BankRoutingNumber,
 		&result.BankAccountNumber,
+		&result.MobileMoneyProvider,
+		&result.MobileMoneyPhone,
+		&result.WalletEmail,
 		&result.HandbookSignedAt,
 		&result.BirthDate,
 		&result.Bio,
@@ -225,6 +239,13 @@ func (directory *Directory) GetByUserID(ctx context.Context, organizationID, use
 		}
 	}
 
+	// If missing, auto-provision from active memberships and retry
+	_ = directory.EnsureMemberEmployees(ctx, organizationID)
+	profRetry, errRetry := directory.scanEmployeeProfile(directory.pool.QueryRow(ctx, query, organizationID, userID))
+	if errRetry == nil {
+		return profRetry, nil
+	}
+
 	return EmployeeProfile{}, ErrEmployeeNotFound
 }
 
@@ -235,6 +256,7 @@ func (directory *Directory) UpdatePersonalProfile(ctx context.Context, organizat
 			address_line_1, address_line_2, city, administrative_area, postal_code,
 			emergency_contact_name, emergency_contact_relationship, emergency_contact_phone,
 			payment_method, bank_name, bank_routing_number, bank_account_number,
+			mobile_money_provider, mobile_money_phone, wallet_email,
 			handbook_signed_at,
 			birth_date, bio, avatar_url, shirt_size, favorite_food, favorite_movies, favorite_music, coffee_tea, fun_fact,
 			updated_at
@@ -243,9 +265,10 @@ func (directory *Directory) UpdatePersonalProfile(ctx context.Context, organizat
 			$4, $5, $6, $7, $8,
 			$9, $10, $11,
 			$12, $13, $14, $15,
-			CASE WHEN $16::text IS NOT NULL AND $16::text != '' THEN now() ELSE NULL END,
-			CASE WHEN $17::text IS NOT NULL AND $17::text != '' THEN $17::date ELSE NULL END,
-			$18, $19, $20, $21, $22, $23, $24, $25,
+			$16, $17, $18,
+			CASE WHEN $19::text IS NOT NULL AND $19::text != '' THEN now() ELSE NULL END,
+			CASE WHEN $20::text IS NOT NULL AND $20::text != '' THEN $20::date ELSE NULL END,
+			$21, $22, $23, $24, $25, $26, $27, $28,
 			now()
 		)
 		ON CONFLICT (employee_id) DO UPDATE SET
@@ -263,6 +286,9 @@ func (directory *Directory) UpdatePersonalProfile(ctx context.Context, organizat
 			bank_name = COALESCE(EXCLUDED.bank_name, employee_personal_profiles.bank_name),
 			bank_routing_number = COALESCE(EXCLUDED.bank_routing_number, employee_personal_profiles.bank_routing_number),
 			bank_account_number = COALESCE(EXCLUDED.bank_account_number, employee_personal_profiles.bank_account_number),
+			mobile_money_provider = COALESCE(EXCLUDED.mobile_money_provider, employee_personal_profiles.mobile_money_provider),
+			mobile_money_phone = COALESCE(EXCLUDED.mobile_money_phone, employee_personal_profiles.mobile_money_phone),
+			wallet_email = COALESCE(EXCLUDED.wallet_email, employee_personal_profiles.wallet_email),
 			handbook_signed_at = CASE WHEN EXCLUDED.handbook_signed_at IS NOT NULL THEN now() ELSE employee_personal_profiles.handbook_signed_at END,
 			birth_date = COALESCE(EXCLUDED.birth_date, employee_personal_profiles.birth_date),
 			bio = COALESCE(EXCLUDED.bio, employee_personal_profiles.bio),
@@ -278,6 +304,7 @@ func (directory *Directory) UpdatePersonalProfile(ctx context.Context, organizat
 		p.AddressLine1, p.AddressLine2, p.City, p.AdministrativeArea, p.PostalCode,
 		p.EmergencyContactName, p.EmergencyContactRelationship, p.EmergencyContactPhone,
 		p.PaymentMethod, p.BankName, p.BankRoutingNumber, p.BankAccountNumber,
+		p.MobileMoneyProvider, p.MobileMoneyPhone, p.WalletEmail,
 		p.HandbookSignedAt,
 		p.BirthDate, p.Bio, p.AvatarURL, p.ShirtSize, p.FavoriteFood, p.FavoriteMovies, p.FavoriteMusic, p.CoffeeTea, p.FunFact)
 

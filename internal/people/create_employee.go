@@ -39,6 +39,28 @@ type CreateEmployeeInput struct {
 	DivisionID      string `json:"divisionId,omitempty"`
 	LocationID      string `json:"locationId,omitempty"`
 	ManagerID       string `json:"managerId,omitempty"`
+	SendInvitation  bool   `json:"sendInvitation,omitempty"`
+}
+
+func (input *CreateEmployeeInput) SetDefaults() {
+	if input.EmploymentType == "" {
+		input.EmploymentType = "full_time"
+	}
+	if input.WorkerType == "" {
+		input.WorkerType = "employee"
+	}
+	if input.WorkArrangement == "" {
+		input.WorkArrangement = "on_site"
+	}
+	if input.PayType == "" {
+		input.PayType = "salary"
+	}
+	if input.FTEBasisPoints == 0 {
+		input.FTEBasisPoints = 10000
+	}
+	if input.HiredOn == "" {
+		input.HiredOn = time.Now().Format("2006-01-02")
+	}
 }
 
 type CreateEmployeeResult struct {

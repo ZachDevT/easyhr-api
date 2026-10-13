@@ -44,6 +44,9 @@ func (directory *Directory) List(ctx context.Context, organizationID, search, st
 	if status != "" && !isEmployeeStatus(status) {
 		return nil, fmt.Errorf("status is invalid")
 	}
+
+	_ = directory.EnsureMemberEmployees(ctx, organizationID)
+
 	rows, err := directory.pool.Query(ctx, `
         SELECT 
             e.id::text, 
@@ -53,17 +56,18 @@ func (directory *Directory) List(ctx context.Context, organizationID, search, st
             e.work_email, 
             e.status,
             a.department_id::text, 
-            COALESCE(d.name, 'General') AS department,
+            COALESCE(d.name, 'Administration') AS department,
             a.division_id::text,
             COALESCE(div.name, '') AS division,
             a.location_id::text,
-            COALESCE(loc.name, 'Remote') AS location,
+            COALESCE(loc.name, 'Headquarters') AS location,
             a.manager_employee_id::text, 
             COALESCE(NULLIF(TRIM(CONCAT(m.first_name, ' ', m.last_name)), ''), 'No manager assigned') AS manager,
-            a.job_title, 
+            COALESCE(a.job_title, 'Team Member') AS job_title, 
             e.hired_on::text,
-            COALESCE(u.avatar_url, '') AS avatar
+            COALESCE(NULLIF(profile.avatar_url, ''), COALESCE(u.avatar_url, '')) AS avatar
         FROM employees e
+        LEFT JOIN employee_personal_profiles profile ON profile.employee_id = e.id
         LEFT JOIN LATERAL (
             SELECT department_id, division_id, location_id, manager_employee_id, job_title
             FROM employment_assignments
@@ -79,7 +83,7 @@ func (directory *Directory) List(ctx context.Context, organizationID, search, st
         WHERE e.organization_id = $1
           AND ($2 = '' OR e.status = $2)
           AND ($3 = '' OR concat_ws(' ', e.first_name, e.last_name, coalesce(e.preferred_name, ''), e.work_email, a.job_title, d.name) ILIKE '%' || $3 || '%')
-        ORDER BY e.last_name ASC, e.first_name ASC, e.id ASC
+        ORDER BY e.created_at ASC, e.last_name ASC, e.first_name ASC
         LIMIT $4`, organizationID, status, strings.TrimSpace(search), limit)
 	if err != nil {
 		return nil, fmt.Errorf("list employees: %w", err)
@@ -116,6 +120,109 @@ func (directory *Directory) List(ctx context.Context, organizationID, search, st
 		return nil, fmt.Errorf("iterate employees: %w", err)
 	}
 	return items, nil
+}
+
+func (directory *Directory) EnsureMemberEmployees(ctx context.Context, organizationID string) error {
+	if organizationID == "" {
+		return nil
+	}
+
+	// 1. Link any unlinked employees whose work_email matches an active member's email
+	_, _ = directory.pool.Exec(ctx, `
+		UPDATE employees e
+		SET user_id = m.user_id
+		FROM memberships m
+		JOIN users u ON u.id = m.user_id
+		WHERE e.organization_id = $1
+		  AND m.organization_id = $1
+		  AND e.user_id IS NULL
+		  AND LOWER(e.work_email) = LOWER(u.email)`, organizationID)
+
+	// 2. Find all active members who lack an employee record in this organization
+	rows, err := directory.pool.Query(ctx, `
+		SELECT 
+			m.user_id::text,
+			COALESCE(NULLIF(u.first_name, ''), 'Team') AS first_name,
+			COALESCE(NULLIF(u.last_name, ''), 'Member') AS last_name,
+			u.email,
+			COALESCE(u.avatar_url, '') AS avatar_url,
+			COALESCE(string_agg(r.key, ','), 'employee') AS roles_agg
+		FROM memberships m
+		JOIN users u ON u.id = m.user_id
+		LEFT JOIN membership_roles mr ON mr.membership_id = m.id
+		LEFT JOIN roles r ON r.id = mr.role_id
+		WHERE m.organization_id = $1
+		  AND m.status = 'active'
+		  AND NOT EXISTS (
+			  SELECT 1 FROM employees e 
+			  WHERE e.organization_id = $1 AND (e.user_id = m.user_id OR LOWER(e.work_email) = LOWER(u.email))
+		  )
+		GROUP BY m.user_id, u.first_name, u.last_name, u.email, u.avatar_url`, organizationID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type memberToProvision struct {
+		userID    string
+		firstName string
+		lastName  string
+		email     string
+		avatarURL string
+		rolesAgg  string
+	}
+	var toProvision []memberToProvision
+	for rows.Next() {
+		var item memberToProvision
+		if err := rows.Scan(&item.userID, &item.firstName, &item.lastName, &item.email, &item.avatarURL, &item.rolesAgg); err == nil {
+			toProvision = append(toProvision, item)
+		}
+	}
+	rows.Close()
+
+	for _, member := range toProvision {
+		var empCount int
+		_ = directory.pool.QueryRow(ctx, `SELECT count(*) FROM employees WHERE organization_id = $1`, organizationID).Scan(&empCount)
+		empNumber := fmt.Sprintf("EMP-%04d", empCount+1)
+
+		jobTitle := "Team Member"
+		if strings.Contains(member.rolesAgg, "owner") {
+			jobTitle = "Founder & Executive"
+		} else if strings.Contains(member.rolesAgg, "hr") {
+			jobTitle = "HR Director"
+		}
+
+		var empID string
+		err := directory.pool.QueryRow(ctx, `
+			INSERT INTO employees (
+				organization_id, user_id, employee_number, first_name, last_name, work_email, status, hired_on
+			) VALUES (
+				$1, $2::uuid, $3, $4, $5, $6, 'active', CURRENT_DATE
+			)
+			ON CONFLICT (organization_id, work_email) DO UPDATE SET user_id = EXCLUDED.user_id
+			RETURNING id::text`, organizationID, member.userID, empNumber, member.firstName, member.lastName, member.email).Scan(&empID)
+		if err != nil {
+			continue
+		}
+
+		_, _ = directory.pool.Exec(ctx, `
+			INSERT INTO employment_assignments (employee_id, job_title, effective_from)
+			VALUES ($1::uuid, $2, CURRENT_DATE)
+			ON CONFLICT DO NOTHING`, empID, jobTitle)
+
+		_, _ = directory.pool.Exec(ctx, `
+			INSERT INTO employment_terms (employee_id, effective_from, employment_type, worker_type, work_arrangement, fte_basis_points, pay_type)
+			VALUES ($1::uuid, CURRENT_DATE, 'full_time', 'employee', 'on_site', 10000, 'salary')
+			ON CONFLICT DO NOTHING`, empID)
+
+		_, _ = directory.pool.Exec(ctx, `
+			INSERT INTO employee_personal_profiles (employee_id, personal_email, avatar_url)
+			VALUES ($1::uuid, $2, $3)
+			ON CONFLICT (employee_id) DO UPDATE SET avatar_url = COALESCE(EXCLUDED.avatar_url, employee_personal_profiles.avatar_url)`,
+			empID, member.email, member.avatarURL)
+	}
+
+	return nil
 }
 
 func (directory *Directory) Activate(ctx context.Context, organizationID, employeeID string) error {

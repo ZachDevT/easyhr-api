@@ -261,6 +261,23 @@ func (s *Server) registerRoutes() {
 		s.api.PUT("/messaging/macros/:macroId", s.updateEmailMacro)
 		s.api.DELETE("/messaging/macros/:macroId", s.deleteEmailMacro)
 		s.api.GET("/messaging/inbound", s.listInboundEmails)
+
+		// Performance
+		s.api.GET("/performance/goals", s.listAllPerformanceGoals)
+		s.api.GET("/performance/goals/:employeeId", s.listPerformanceGoals)
+		s.api.POST("/performance/goals/:employeeId", s.createPerformanceGoal)
+		s.api.GET("/performance/reviews", s.listPerformanceReviews)
+		s.api.POST("/performance/reviews/:employeeId", s.createPerformanceReview)
+		s.api.POST("/performance/feedback/:employeeId", s.createFeedbackRecord)
+
+		// Benefits
+		s.api.GET("/benefits/plans", s.listBenefitPlans)
+		s.api.POST("/benefits/plans", s.createBenefitPlan)
+		s.api.GET("/benefits/enrollments", s.listAllBenefitEnrollments)
+		s.api.GET("/benefits/enrollments/:employeeId", s.listBenefitEnrollments)
+		s.api.POST("/benefits/enrollments/:employeeId", s.createBenefitEnrollment)
+		s.api.POST("/benefits/rewards/:employeeId", s.createRewardStatement)
+
 		s.authenticated.POST("/setup/organizations", s.createOrganization)
 		s.authenticated.POST("/auth/provision", s.provisionIdentity)
 		s.authenticated.GET("/setup/status", s.checkSetupStatus)
@@ -1158,6 +1175,15 @@ func (s *Server) createEmployee(c echo.Context) error {
 	if err := c.Bind(&input); err != nil {
 		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_json", "Invalid request", "Request body must be valid JSON")
 	}
+
+	input.SetDefaults()
+
+	if strings.TrimSpace(input.EmployeeNumber) == "" {
+		var empCount int
+		_ = s.pool.QueryRow(c.Request().Context(), `SELECT count(*) FROM employees WHERE organization_id = $1`, principal.OrganizationID).Scan(&empCount)
+		input.EmployeeNumber = fmt.Sprintf("EMP-%04d", empCount+1)
+	}
+
 	idemKey := c.Request().Header.Get("Idempotency-Key")
 	if len(idemKey) < 16 {
 		idemKey = fmt.Sprintf("idem-%d-%s", time.Now().UnixNano(), principal.UserID)
@@ -1177,6 +1203,19 @@ func (s *Server) createEmployee(c echo.Context) error {
 			return problem(c, http.StatusUnprocessableEntity, "validation.invalid_employee", "Invalid employee", err.Error())
 		}
 	}
+
+	if input.SendInvitation {
+		destEmail := input.PersonalEmail
+		if destEmail == "" {
+			destEmail = input.WorkEmail
+		}
+		candidateName := strings.TrimSpace(input.FirstName + " " + input.LastName)
+		go func() {
+			bgCtx := context.Background()
+			_ = s.dispatchInvitationForEmployee(bgCtx, principal.OrganizationID, result.ID, destEmail, candidateName, input.JobTitle, input.HiredOn)
+		}()
+	}
+
 	return c.JSON(http.StatusCreated, result)
 }
 
@@ -1253,9 +1292,24 @@ func (s *Server) updateMyPersonalProfile(c echo.Context) error {
 		var userEmail string
 		_ = s.pool.QueryRow(c.Request().Context(), "SELECT email FROM users WHERE id = $1", principal.UserID).Scan(&userEmail)
 		_ = s.pool.QueryRow(c.Request().Context(), "SELECT id::text FROM employees WHERE organization_id = $1 AND (LOWER(work_email) = LOWER($2) OR LOWER(id::text) = LOWER($2)) LIMIT 1", principal.OrganizationID, userEmail).Scan(&empID)
+		if empID == "" {
+			_ = s.people.EnsureMemberEmployees(c.Request().Context(), principal.OrganizationID)
+			_ = s.pool.QueryRow(c.Request().Context(), "SELECT id::text FROM employees WHERE user_id = $1 AND organization_id = $2", principal.UserID, principal.OrganizationID).Scan(&empID)
+		}
 	}
 
 	if empID != "" {
+		if input.FirstName != nil && *input.FirstName != "" {
+			_, _ = s.pool.Exec(c.Request().Context(), `UPDATE employees SET first_name = $1 WHERE id = $2::uuid`, *input.FirstName, empID)
+			_, _ = s.pool.Exec(c.Request().Context(), `UPDATE users SET first_name = $1 WHERE id = $2::uuid`, *input.FirstName, principal.UserID)
+		}
+		if input.LastName != nil && *input.LastName != "" {
+			_, _ = s.pool.Exec(c.Request().Context(), `UPDATE employees SET last_name = $1 WHERE id = $2::uuid`, *input.LastName, empID)
+			_, _ = s.pool.Exec(c.Request().Context(), `UPDATE users SET last_name = $1 WHERE id = $2::uuid`, *input.LastName, principal.UserID)
+		}
+		if input.PersonalPhone != nil {
+			_, _ = s.pool.Exec(c.Request().Context(), `UPDATE users SET phone = $1 WHERE id = $2::uuid`, *input.PersonalPhone, principal.UserID)
+		}
 		if err := s.people.UpdatePersonalProfile(c.Request().Context(), principal.OrganizationID, empID, input); err != nil {
 			return problem(c, http.StatusInternalServerError, "profile.update_failed", "Failed to update profile", err.Error())
 		}
@@ -1372,6 +1426,58 @@ func (s *Server) sendOnboardingInvitation(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{"sent": true, "recipient": req.Email})
+}
+
+func (s *Server) dispatchInvitationForEmployee(ctx context.Context, organizationID, employeeID, destEmail, name, jobTitle, startDate string) error {
+	var orgName, logoURL, brandColor, websiteURL, subdomain string
+	_ = s.pool.QueryRow(ctx, `
+		SELECT o.name, COALESCE(w.logo_url, ''), COALESCE(w.brand_color, '#4F46E5'), COALESCE(lp.website_url, ''), COALESCE(w.subdomain, '')
+		FROM organizations o
+		LEFT JOIN workspaces w ON w.organization_id = o.id
+		LEFT JOIN organization_legal_profiles lp ON lp.organization_id = o.id
+		WHERE o.id = $1`, organizationID).Scan(&orgName, &logoURL, &brandColor, &websiteURL, &subdomain)
+
+	var token string
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err == nil {
+		token = hex.EncodeToString(tokenBytes)
+		expiresAt := time.Now().Add(7 * 24 * time.Hour)
+		var empIDParam any
+		if employeeID != "" {
+			empIDParam = employeeID
+		}
+		_, errIns := s.pool.Exec(ctx, `
+			INSERT INTO invitations (organization_id, employee_id, email, name, role, token, status, expires_at)
+			VALUES ($1::uuid, $2, $3, $4, 'employee', $5, 'pending', $6)`,
+			organizationID, empIDParam, destEmail, name, token, expiresAt)
+		if errIns != nil {
+			slog.Error("failed to record invitation token", "error", errIns)
+		}
+	}
+
+	var portalURL string
+	if token != "" {
+		if subdomain != "" {
+			portalURL = fmt.Sprintf("https://%s.easyhr.pro/auth/accept-invite?token=%s&redirect_url=/my-onboarding", subdomain, token)
+		} else {
+			portalURL = fmt.Sprintf("https://easyhr.pro/auth/accept-invite?token=%s&redirect_url=/my-onboarding", token)
+		}
+	} else {
+		if subdomain != "" {
+			portalURL = fmt.Sprintf("https://%s.easyhr.pro/auth/accept-invite?email=%s&name=%s&redirect_url=/my-onboarding", subdomain, url.QueryEscape(destEmail), url.QueryEscape(name))
+		} else {
+			portalURL = fmt.Sprintf("https://easyhr.pro/auth/accept-invite?email=%s&name=%s&redirect_url=/my-onboarding", url.QueryEscape(destEmail), url.QueryEscape(name))
+		}
+	}
+
+	branding := email.BrandingInfo{
+		CompanyName: orgName,
+		LogoURL:     logoURL,
+		BrandColor:  brandColor,
+		WebsiteURL:  websiteURL,
+	}
+
+	return s.email.SendOnboardingInvitationWithBranding(ctx, destEmail, name, jobTitle, startDate, portalURL, branding)
 }
 
 type OnboardingSettings struct {
@@ -2394,18 +2500,45 @@ func (s *Server) convertHiredApplicantToEmployee(ctx context.Context, orgID, act
 	return employeeID, nil
 }
 
+func (s *Server) listAllPerformanceGoals(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.performance.ListAllGoals(c.Request().Context(), principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "performance.goals_failed", "Internal error", "Could not fetch goals")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
 func (s *Server) listPerformanceGoals(c echo.Context) error {
 	principal, ok := identity.PrincipalFromContext(c.Request().Context())
 	if !ok {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
-	if !principal.HasPermission("performance:read") {
-		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
-	}
 	result, err := s.performance.ListGoals(c.Request().Context(), principal.OrganizationID, c.Param("employeeId"))
 	if err != nil {
 		return problem(c, http.StatusInternalServerError, "performance.goals_failed", "Internal error", "Could not fetch goals")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listPerformanceReviews(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	var empID *string
+	if q := c.QueryParam("employeeId"); q != "" {
+		empID = &q
+	}
+	result, err := s.performance.ListReviews(c.Request().Context(), principal.OrganizationID, empID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "performance.reviews_failed", "Internal error", "Could not fetch reviews")
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -2416,9 +2549,6 @@ func (s *Server) createPerformanceGoal(c echo.Context) error {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
-	if !principal.HasPermission("performance:manage") {
-		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
-	}
 	var input performance.CreateGoalInput
 	if err := c.Bind(&input); err != nil {
 		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
@@ -2439,9 +2569,6 @@ func (s *Server) createPerformanceReview(c echo.Context) error {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
-	if !principal.HasPermission("performance:manage") {
-		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
-	}
 	var input performance.CreateReviewInput
 	if err := c.Bind(&input); err != nil {
 		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
@@ -2572,6 +2699,19 @@ func (s *Server) createBenefitPlan(c echo.Context) error {
 	result, err := s.benefits.CreatePlan(c.Request().Context(), principal.OrganizationID, principal.UserID, input)
 	if err != nil {
 		return problem(c, http.StatusInternalServerError, "benefits.create_failed", "Internal error", "Could not create")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listAllBenefitEnrollments(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	result, err := s.benefits.ListAllEnrollments(c.Request().Context(), principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "benefits.list_enrollments_failed", "Internal error", "Could not fetch enrollments")
 	}
 	return c.JSON(http.StatusOK, result)
 }

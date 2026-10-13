@@ -131,6 +131,29 @@ func (service *SetupService) CreateOrganization(ctx context.Context, externalIde
 		return SetupResult{}, normalizeSetupError(err)
 	}
 
+	// Auto-provision owner as an active employee in the directory
+	var ownerEmpID string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO employees (organization_id, user_id, employee_number, first_name, last_name, work_email, status, hired_on)
+		SELECT $1, $2::uuid, 'EMP-0001', COALESCE(NULLIF(first_name, ''), 'Company'), COALESCE(NULLIF(last_name, ''), 'Owner'), email, 'active', CURRENT_DATE
+		FROM users WHERE id = $2::uuid
+		ON CONFLICT (organization_id, work_email) DO UPDATE SET user_id = EXCLUDED.user_id
+		RETURNING id::text`, result.OrganizationID, userID).Scan(&ownerEmpID)
+	if err == nil {
+		_, _ = tx.Exec(ctx, `
+			INSERT INTO employment_assignments (employee_id, job_title, effective_from)
+			VALUES ($1::uuid, 'Founder & Executive', CURRENT_DATE)
+			ON CONFLICT DO NOTHING`, ownerEmpID)
+		_, _ = tx.Exec(ctx, `
+			INSERT INTO employment_terms (employee_id, effective_from, employment_type, worker_type, work_arrangement, fte_basis_points, pay_type, created_by_user_id)
+			VALUES ($1::uuid, CURRENT_DATE, 'full_time', 'employee', 'on_site', 10000, 'salary', $2::uuid)
+			ON CONFLICT DO NOTHING`, ownerEmpID, userID)
+		_, _ = tx.Exec(ctx, `
+			INSERT INTO employee_personal_profiles (employee_id, personal_email, avatar_url)
+			SELECT $1::uuid, email, avatar_url FROM users WHERE id = $2::uuid
+			ON CONFLICT (employee_id) DO NOTHING`, ownerEmpID)
+	}
+
 	// Seed default workspace roles (employee, hr_manager)
 	var employeeRoleID string
 	if err := tx.QueryRow(ctx, `
