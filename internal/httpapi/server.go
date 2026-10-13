@@ -260,6 +260,7 @@ func (s *Server) registerRoutes() {
 		s.authenticated.GET("/setup/status", s.checkSetupStatus)
 	}
 	s.echo.GET("/api/v1/public/assets/*", s.servePublicAsset)
+	s.echo.HEAD("/api/v1/public/assets/*", s.servePublicAsset)
 	s.echo.GET("/api/v1/public/jobs", s.listPublicJobs)
 	s.echo.GET("/api/v1/public/company", s.getPublicCompany)
 	s.echo.POST("/api/v1/public/upload-resume", s.uploadPublicResume)
@@ -1863,7 +1864,7 @@ func (s *Server) uploadPublicResume(c echo.Context) error {
 		_ = s.storage.PutObject(c.Request().Context(), key, contentType, bytes.NewReader(buf), int64(len(buf)))
 	}
 
-	publicURL := fmt.Sprintf("http://localhost:8080/api/v1/public/assets/%s", key)
+	publicURL := s.buildPublicAssetURL(c, key)
 
 	return c.JSON(http.StatusOK, map[string]any{
 		"resumeUrl":      publicURL,

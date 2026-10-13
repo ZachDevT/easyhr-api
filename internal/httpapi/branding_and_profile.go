@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -212,7 +213,7 @@ func (s *Server) uploadBrandingLogo(c echo.Context) error {
 		return problem(c, http.StatusInternalServerError, "storage.upload_failed", "Storage error", fmt.Sprintf("Failed to store in Cloudflare R2: %v", err))
 	}
 
-	publicURL := fmt.Sprintf("http://localhost:8080/api/v1/public/assets/%s", key)
+	publicURL := s.buildPublicAssetURL(c, key)
 
 	_, err = s.pool.Exec(c.Request().Context(), `
 		UPDATE workspaces
@@ -273,7 +274,7 @@ func (s *Server) uploadUserAvatar(c echo.Context) error {
 		return problem(c, http.StatusInternalServerError, "storage.upload_failed", "Storage error", fmt.Sprintf("Failed to store in Cloudflare R2: %v", err))
 	}
 
-	publicURL := fmt.Sprintf("http://localhost:8080/api/v1/public/assets/%s", key)
+	publicURL := s.buildPublicAssetURL(c, key)
 
 	_, err = s.pool.Exec(c.Request().Context(), `
 		UPDATE users
@@ -469,4 +470,19 @@ func extensionForMime(mime string) string {
 	default:
 		return "png"
 	}
+}
+
+func (s *Server) buildPublicAssetURL(c echo.Context, key string) string {
+	proto := "https"
+	host := c.Request().Host
+	if host == "" || strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1") {
+		if os.Getenv("EASYHR_ENV") == "production" {
+			return fmt.Sprintf("https://easyhr-api-180870038176.us-central1.run.app/api/v1/public/assets/%s", key)
+		}
+		return fmt.Sprintf("http://localhost:8080/api/v1/public/assets/%s", key)
+	}
+	if xfp := c.Request().Header.Get("X-Forwarded-Proto"); xfp != "" {
+		proto = xfp
+	}
+	return fmt.Sprintf("%s://%s/api/v1/public/assets/%s", proto, host, key)
 }
