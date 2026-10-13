@@ -303,6 +303,11 @@ func (s *Server) registerRoutes() {
 		s.api.GET("/offboarding/plans", s.listOffboardingPlans)
 		s.api.POST("/offboarding/plans", s.createOffboardingPlan)
 
+		// Employee Relations
+		s.api.GET("/relations/cases", s.listRelationCases)
+		s.api.POST("/relations/cases", s.createRelationCase)
+		s.api.POST("/relations/cases/:caseId/actions", s.executeRelationAction)
+
 		s.authenticated.POST("/setup/organizations", s.createOrganization)
 		s.authenticated.POST("/auth/provision", s.provisionIdentity)
 		s.authenticated.GET("/setup/status", s.checkSetupStatus)
