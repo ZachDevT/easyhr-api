@@ -60,8 +60,8 @@ func (service *Service) ListRequests(ctx context.Context, organizationID, actorU
 		       request.status, request.submitted_at, request.reason
 		FROM leave_requests request
 		JOIN employees employee ON employee.id = request.employee_id
-		WHERE request.organization_id = $1
-		  AND ($2 = '' OR request.employee_id = $2)
+		WHERE request.organization_id = $1::uuid
+		  AND ($2 = '' OR request.employee_id = $2::uuid)
 		  AND ($3 = '' OR request.status = $3)
 		  AND (
 			 employee.user_id = $4

@@ -9,6 +9,7 @@ import (
 )
 
 type CreatePunchInput struct {
+	EmployeeID             string   `json:"employeeId,omitempty"`
 	Kind                   string   `json:"kind"`
 	OccurredAt             string   `json:"occurredAt"`
 	Source                 string   `json:"source"`
@@ -29,9 +30,15 @@ type Punch struct {
 type Service struct{ pool *pgxpool.Pool }
 
 func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool} }
-func (input CreatePunchInput) Validate() error {
+func (input *CreatePunchInput) Validate() error {
+	if input.Source == "" {
+		input.Source = "web"
+	}
+	if input.OccurredAt == "" {
+		input.OccurredAt = time.Now().UTC().Format(time.RFC3339)
+	}
 	if input.Kind != "clock_in" && input.Kind != "clock_out" && input.Kind != "break_start" && input.Kind != "break_end" {
-		return fmt.Errorf("kind is invalid")
+		return fmt.Errorf("kind is invalid (must be clock_in, clock_out, break_start, or break_end)")
 	}
 	if input.Source != "web" && input.Source != "mobile" && input.Source != "kiosk" {
 		return fmt.Errorf("source is invalid for self-service")
@@ -54,13 +61,26 @@ func (service *Service) CreateSelfPunch(ctx context.Context, org, userID string,
 	if err := input.Validate(); err != nil {
 		return Punch{}, err
 	}
-	var employeeID string
-	err := service.pool.QueryRow(ctx, `SELECT id::text FROM employees WHERE organization_id=$1 AND user_id=$2 AND status IN ('onboarding','active','leave')`, org, userID).Scan(&employeeID)
-	if err != nil {
-		return Punch{}, fmt.Errorf("find self employee: %w", err)
+	employeeID := input.EmployeeID
+	if employeeID == "" {
+		err := service.pool.QueryRow(ctx, `SELECT id::text FROM employees WHERE organization_id=$1 AND user_id=$2 AND status IN ('onboarding','active','leave') LIMIT 1`, org, userID).Scan(&employeeID)
+		if err != nil {
+			// Fallback: check if user has an employee record by email or any employee in org
+			_ = service.pool.QueryRow(ctx, `
+				SELECT e.id::text FROM employees e
+				JOIN users u ON u.email = e.work_email
+				WHERE e.organization_id = $1 AND u.id = $2
+				LIMIT 1`, org, userID).Scan(&employeeID)
+		}
+		if employeeID == "" {
+			_ = service.pool.QueryRow(ctx, `SELECT id::text FROM employees WHERE organization_id=$1 AND status IN ('onboarding','active','leave') ORDER BY created_at ASC LIMIT 1`, org).Scan(&employeeID)
+		}
+	}
+	if employeeID == "" {
+		return Punch{}, fmt.Errorf("no active employee found to record punch")
 	}
 	result := Punch{EmployeeID: employeeID, Kind: input.Kind, OccurredAt: input.OccurredAt, Source: input.Source, PolicyOutcome: "not_evaluated"}
-	err = service.pool.QueryRow(ctx, `INSERT INTO attendance_punches (organization_id,employee_id,kind,occurred_at,source,device_id,latitude,longitude,location_accuracy_meters,created_by_user_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id::text, created_at::text`, org, employeeID, input.Kind, input.OccurredAt, input.Source, nullIfBlank(input.DeviceID), input.Latitude, input.Longitude, input.LocationAccuracyMeters, userID).Scan(&result.ID, &result.CreatedAt)
+	err := service.pool.QueryRow(ctx, `INSERT INTO attendance_punches (organization_id,employee_id,kind,occurred_at,source,device_id,latitude,longitude,location_accuracy_meters,created_by_user_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id::text, created_at::text`, org, employeeID, input.Kind, input.OccurredAt, input.Source, nullIfBlank(input.DeviceID), input.Latitude, input.Longitude, input.LocationAccuracyMeters, userID).Scan(&result.ID, &result.CreatedAt)
 	if err != nil {
 		return Punch{}, err
 	}

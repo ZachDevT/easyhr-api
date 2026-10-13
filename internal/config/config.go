@@ -42,7 +42,15 @@ type DocuSignConfig struct {
 func Load() (Config, error) {
 	cfg := Config{
 		Environment: defaultString(os.Getenv("EASYHR_ENV"), "development"),
-		HTTPAddress: defaultString(os.Getenv("EASYHR_HTTP_ADDRESS"), ":8080"),
+		HTTPAddress: func() string {
+			if addr := strings.TrimSpace(os.Getenv("EASYHR_HTTP_ADDRESS")); addr != "" {
+				return addr
+			}
+			if port := strings.TrimSpace(os.Getenv("PORT")); port != "" {
+				return ":" + port
+			}
+			return ":8080"
+		}(),
 		DatabaseURL: strings.TrimSpace(os.Getenv("EASYHR_DATABASE_URL")),
 		AllowedOrigins: splitCSV(defaultString(
 			os.Getenv("EASYHR_ALLOWED_ORIGINS"),

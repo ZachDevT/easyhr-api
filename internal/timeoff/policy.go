@@ -122,3 +122,161 @@ func (service *Service) AssignPolicy(ctx context.Context, org, actor, policyID s
 	}
 	return tx.Commit(ctx)
 }
+
+type PolicyDetail struct {
+	ID                    string  `json:"id"`
+	LeaveTypeID           string  `json:"leaveTypeId"`
+	LeaveTypeCode         string  `json:"leaveTypeCode"`
+	LeaveTypeName         string  `json:"leaveTypeName"`
+	Name                  string  `json:"name"`
+	AccrualFrequency      string  `json:"accrualFrequency"` // "none", "weekly", "monthly", "annual"
+	AccrualMinutes        int     `json:"accrualMinutes"`
+	AccrualHours          float64 `json:"accrualHours"`
+	CarryoverLimitMinutes *int    `json:"carryoverLimitMinutes,omitempty"`
+	AllowsNegativeBalance bool    `json:"allowsNegativeBalance"`
+	EffectiveFrom         string  `json:"effectiveFrom"`
+	Status                string  `json:"status"`
+	AssignedEmployees     int     `json:"assignedEmployees"`
+}
+
+func (service *Service) ListPolicies(ctx context.Context, organizationID string) ([]PolicyDetail, error) {
+	rows, err := service.pool.Query(ctx, `
+		SELECT 
+			p.id::text, 
+			p.leave_type_id::text, 
+			t.code, 
+			t.name, 
+			p.name, 
+			p.accrual_frequency, 
+			p.accrual_minutes,
+			p.carryover_limit_minutes,
+			p.allows_negative_balance,
+			p.effective_from::text,
+			p.status,
+			COUNT(DISTINCT a.employee_id)
+		FROM leave_policies p
+		JOIN leave_types t ON t.id = p.leave_type_id
+		LEFT JOIN leave_policy_assignments a ON a.leave_policy_id = p.id AND (a.effective_to IS NULL OR a.effective_to >= CURRENT_DATE)
+		WHERE p.organization_id = $1 AND p.status = 'active'
+		GROUP BY p.id, p.leave_type_id, t.code, t.name, p.name, p.accrual_frequency, p.accrual_minutes, p.carryover_limit_minutes, p.allows_negative_balance, p.effective_from, p.status
+		ORDER BY p.name ASC
+	`, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := []PolicyDetail{}
+	for rows.Next() {
+		var item PolicyDetail
+		if err := rows.Scan(
+			&item.ID, &item.LeaveTypeID, &item.LeaveTypeCode, &item.LeaveTypeName,
+			&item.Name, &item.AccrualFrequency, &item.AccrualMinutes,
+			&item.CarryoverLimitMinutes, &item.AllowsNegativeBalance,
+			&item.EffectiveFrom, &item.Status, &item.AssignedEmployees,
+		); err != nil {
+			return nil, err
+		}
+		item.AccrualHours = float64(item.AccrualMinutes) / 60.0
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (service *Service) AssignPolicyToAll(ctx context.Context, org, actor, policyID string) error {
+	var leaveTypeID string
+	var accrualMinutes int
+	err := service.pool.QueryRow(ctx, `
+		SELECT leave_type_id::text, accrual_minutes
+		FROM leave_policies
+		WHERE id = $1 AND organization_id = $2
+	`, policyID, org).Scan(&leaveTypeID, &accrualMinutes)
+	if err != nil {
+		return err
+	}
+
+	rows, err := service.pool.Query(ctx, `SELECT id::text FROM employees WHERE organization_id = $1 AND status IN ('active', 'onboarding')`, org)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var empIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			empIDs = append(empIDs, id)
+		}
+	}
+
+	for _, empID := range empIDs {
+		_, _ = service.pool.Exec(ctx, `
+			INSERT INTO leave_policy_assignments (employee_id, leave_policy_id, effective_from, created_by_user_id)
+			VALUES ($1, $2, CURRENT_DATE, $3)
+			ON CONFLICT (employee_id, leave_policy_id, effective_from) DO NOTHING
+		`, empID, policyID, actor)
+
+		if accrualMinutes > 0 {
+			_, _ = service.pool.Exec(ctx, `
+				INSERT INTO leave_ledger_entries (organization_id, employee_id, leave_type_id, entry_type, minutes, effective_on, source_type, note, created_by_user_id)
+				VALUES ($1, $2, $3, 'accrual', $4, CURRENT_DATE, 'policy_grant', 'Initial leave balance credit', $5)
+				ON CONFLICT DO NOTHING
+			`, org, empID, leaveTypeID, accrualMinutes, actor)
+		}
+	}
+	return nil
+}
+
+func (service *Service) RunMonthlyAccrual(ctx context.Context, org, actor string) (int, error) {
+	rows, err := service.pool.Query(ctx, `
+		SELECT DISTINCT a.employee_id::text, p.leave_type_id::text, p.accrual_minutes
+		FROM leave_policy_assignments a
+		JOIN leave_policies p ON p.id = a.leave_policy_id
+		JOIN employees e ON e.id = a.employee_id
+		WHERE p.organization_id = $1
+		  AND p.status = 'active'
+		  AND p.accrual_frequency = 'monthly'
+		  AND p.accrual_minutes > 0
+		  AND e.status IN ('active', 'onboarding')
+		  AND a.effective_from <= CURRENT_DATE
+		  AND (a.effective_to IS NULL OR a.effective_to >= CURRENT_DATE)
+	`, org)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	credited := 0
+	for rows.Next() {
+		var empID, leaveTypeID string
+		var mins int
+		if err := rows.Scan(&empID, &leaveTypeID, &mins); err == nil {
+			_, err = service.pool.Exec(ctx, `
+				INSERT INTO leave_ledger_entries (organization_id, employee_id, leave_type_id, entry_type, minutes, effective_on, source_type, note, created_by_user_id)
+				VALUES ($1, $2, $3, 'accrual', $4, CURRENT_DATE, 'monthly_credit', 'Monthly automated PTO accrual', $5)
+			`, org, empID, leaveTypeID, mins, actor)
+			if err == nil {
+				credited++
+			}
+		}
+	}
+	return credited, nil
+}
+
+type CreateAdjustmentInput struct {
+	EmployeeID  string `json:"employeeId"`
+	LeaveTypeID string `json:"leaveTypeId"`
+	Minutes     int    `json:"minutes"`
+	Note        string `json:"note"`
+}
+
+func (service *Service) CreateAdjustment(ctx context.Context, org, actor string, input CreateAdjustmentInput) error {
+	if input.EmployeeID == "" || input.LeaveTypeID == "" || input.Minutes == 0 {
+		return fmt.Errorf("employeeId, leaveTypeId, and non-zero minutes required")
+	}
+	_, err := service.pool.Exec(ctx, `
+		INSERT INTO leave_ledger_entries (organization_id, employee_id, leave_type_id, entry_type, minutes, effective_on, source_type, note, created_by_user_id)
+		VALUES ($1, $2, $3, 'adjustment', $4, CURRENT_DATE, 'manual_adjustment', $5, $6)
+	`, org, input.EmployeeID, input.LeaveTypeID, input.Minutes, input.Note, actor)
+	return err
+}

@@ -25,6 +25,15 @@ func main() {
 	fmt.Println("🧹 Cleaning up organizations, workspaces, and users...")
 
 	tables := []string{
+		"candidate_email_messages",
+		"candidate_email_threads",
+		"job_applicants",
+		"job_postings",
+		"leave_requests",
+		"leave_policies",
+		"leave_types",
+		"attendance_records",
+		"employees",
 		"audit_events",
 		"bootstrap_idempotency_keys",
 		"idempotency_keys",

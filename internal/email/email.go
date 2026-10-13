@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -20,11 +21,11 @@ type Service struct {
 }
 
 func NewService(apiKey, fromEmail, fromName string) *Service {
-	if fromEmail == "" || strings.HasSuffix(fromEmail, "@projecteasyhr.com") {
-		fromEmail = "onboarding@resend.dev"
+	if fromEmail == "" || strings.HasSuffix(fromEmail, "@projecteasyhr.com") || strings.HasSuffix(fromEmail, "@resend.dev") || fromEmail == "notifications@easyhr.pro" {
+		fromEmail = "notifications@recruter.easyhr.pro"
 	}
 	if fromName == "" {
-		fromName = "ProjectEasyHR"
+		fromName = "EasyHR"
 	}
 	return &Service{
 		apiKey:     strings.TrimSpace(apiKey),
@@ -39,6 +40,7 @@ type SendEmailPayload struct {
 	To      []string `json:"to"`
 	Subject string   `json:"subject"`
 	HTML    string   `json:"html"`
+	ReplyTo string   `json:"reply_to,omitempty"`
 }
 
 type BrandingInfo struct {
@@ -64,6 +66,7 @@ func (s *Service) sendViaResend(ctx context.Context, toEmail, subject, htmlBody 
 			To:      []string{recipient},
 			Subject: sub,
 			HTML:    htmlBody,
+			ReplyTo: "notifications@recruter.easyhr.pro",
 		}
 
 		reqBytes, err := json.Marshal(payload)
@@ -90,19 +93,23 @@ func (s *Service) sendViaResend(ctx context.Context, toEmail, subject, htmlBody 
 
 	statusCode, respStr, err := sendReq(toEmail, subject)
 	if err == nil && statusCode >= 200 && statusCode < 300 {
-		log.Printf("[Email Success] Email sent successfully via Resend to %s: %s", toEmail, respStr)
+		log.Printf("[Email Success] Email sent successfully via Resend from %s to %s: %s", s.fromEmail, toEmail, respStr)
 		return nil
 	}
 
-	// Resend free sandbox fallback to verified account email
-	if statusCode == 403 && strings.Contains(respStr, "testing emails") {
-		fallbackEmail := "zachsoft2@gmail.com"
-		devSubject := fmt.Sprintf("[Testing Mode - For %s] %s", toEmail, subject)
-		log.Printf("[Email Notice] Resend sandbox restriction. Rerouting to account owner <%s>...", fallbackEmail)
-		statusFallback, respFallback, errFallback := sendReq(fallbackEmail, devSubject)
-		if errFallback == nil && statusFallback >= 200 && statusFallback < 300 {
-			log.Printf("[Email Success] Delivered to account owner <%s> via Resend: %s", fallbackEmail, respFallback)
-			return nil
+	// Resend sandbox or unverified domain notice
+	if statusCode == 403 {
+		log.Printf("[Email Notice] Resend status 403 for recipient %s with sender %s: %s. To ensure live delivery to external candidate inboxes, add easyhr.pro at https://resend.com/domains with DNS records (DKIM, SPF).", toEmail, s.fromEmail, respStr)
+		if strings.Contains(respStr, "testing emails") {
+			fallbackEmail := strings.TrimSpace(os.Getenv("DEV_EMAIL_FALLBACK"))
+			if fallbackEmail != "" {
+				devSubject := fmt.Sprintf("[Sandbox Test for %s] %s", toEmail, subject)
+				statusFallback, respFallback, errFallback := sendReq(fallbackEmail, devSubject)
+				if errFallback == nil && statusFallback >= 200 && statusFallback < 300 {
+					log.Printf("[Email Success] Delivered to sandbox account owner <%s> via Resend: %s", fallbackEmail, respFallback)
+					return nil
+				}
+			}
 		}
 	}
 
@@ -410,5 +417,10 @@ func (s *Service) SendJobOfferNotification(ctx context.Context, toEmail, candida
 </body>
 </html>`, branding.CompanyName, branding.BrandColor, branding.BrandColor, logoHTML, branding.CompanyName, candidateName, branding.CompanyName, jobTitle, jobTitle, branding.CompanyName, startDate, acceptURL, branding.CompanyName)
 
+	return s.sendViaResend(ctx, toEmail, subject, htmlBody)
+}
+
+// SendRaw sends an arbitrary HTML email. Implements messaging.EmailSender.
+func (s *Service) SendRaw(ctx context.Context, toEmail, subject, htmlBody string) error {
 	return s.sendViaResend(ctx, toEmail, subject, htmlBody)
 }

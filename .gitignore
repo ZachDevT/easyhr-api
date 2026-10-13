@@ -6,6 +6,8 @@ coverage.out
 # Local environment files and secrets
 .env
 .env.*
+env.*.yaml
+env.production.yaml
 !.env.example
 
 # Editors and operating systems

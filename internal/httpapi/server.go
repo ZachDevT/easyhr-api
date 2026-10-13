@@ -12,6 +12,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/clerk/clerk-sdk-go/v2"
@@ -26,6 +27,7 @@ import (
 	"github.com/easyhr/easyhr-be/internal/documents"
 	"github.com/easyhr/easyhr-be/internal/email"
 	"github.com/easyhr/easyhr-be/internal/hiring"
+	"github.com/easyhr/easyhr-be/internal/messaging"
 	"github.com/easyhr/easyhr-be/internal/holidays"
 	"github.com/easyhr/easyhr-be/internal/identity"
 	"github.com/easyhr/easyhr-be/internal/offboarding"
@@ -78,6 +80,7 @@ type Server struct {
 	departments   *tenancy.DepartmentService
 	divisions     *tenancy.DivisionService
 	email         *email.Service
+	messaging     *messaging.Service
 }
 
 func New(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.Middleware, clerkSecretKey string) *Server {
@@ -103,7 +106,8 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 		MaxAge:           86400,
 	}))
 
-	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), storage: documentStorage, setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), operations: operations.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool), email: email.NewService(os.Getenv("RESEND_API_KEY"), os.Getenv("EMAIL_FROM"), os.Getenv("EMAIL_FROM_NAME"))}
+	emailSvc := email.NewService(os.Getenv("RESEND_API_KEY"), os.Getenv("EMAIL_FROM"), os.Getenv("EMAIL_FROM_NAME"))
+	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), storage: documentStorage, setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), operations: operations.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool), email: emailSvc, messaging: messaging.NewService(pool, emailSvc)}
 	if authentication != nil {
 		s.authenticated = e.Group("/api/v1")
 		s.authenticated.Use(adaptHTTPMiddleware(authentication))
@@ -176,10 +180,18 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/onboarding/send-invitation", s.sendOnboardingInvitation)
 		s.api.POST("/leave/requests", s.submitLeaveRequest)
 		s.api.GET("/leave/requests", s.listLeaveRequests)
+		s.api.GET("/leave/overview", s.getLeaveOverview)
 		s.api.GET("/leave/balances", s.listLeaveBalances)
+		s.api.GET("/leave/types", s.listLeaveTypes)
 		s.api.POST("/leave/types", s.createLeaveType)
+		s.api.PUT("/leave/types/:typeId", s.updateLeaveType)
+		s.api.PATCH("/leave/types/:typeId", s.updateLeaveType)
+		s.api.GET("/leave/policies", s.listLeavePolicies)
 		s.api.POST("/leave/policies", s.createLeavePolicy)
 		s.api.POST("/leave/policies/:policyId/assignments", s.assignLeavePolicy)
+		s.api.POST("/leave/policies/:policyId/assign-all", s.assignLeavePolicyToAll)
+		s.api.POST("/leave/run-accrual", s.runMonthlyAccrual)
+		s.api.POST("/leave/adjustments", s.createLeaveAdjustment)
 		s.api.POST("/attendance/punches", s.createAttendancePunch)
 		s.api.GET("/attendance/punches", s.listAttendancePunches)
 		s.api.GET("/attendance/live", s.getLiveAttendance)
@@ -211,6 +223,16 @@ func (s *Server) registerRoutes() {
 		s.api.GET("/hiring/applicants", s.listAllApplicants)
 		s.api.PATCH("/hiring/applicants/:applicantId/status", s.updateApplicantStatus)
 		s.api.POST("/hiring/applicants/:applicantId/offer", s.createJobOffer)
+		// Messaging (Email Threads & Macros)
+		s.api.POST("/messaging/threads", s.createEmailThread)
+		s.api.GET("/messaging/threads", s.listEmailThreads)
+		s.api.GET("/messaging/threads/:threadId/messages", s.getEmailThreadMessages)
+		s.api.POST("/messaging/threads/:threadId/reply", s.replyToEmailThread)
+		s.api.POST("/messaging/threads/:threadId/candidate-reply", s.recordCandidateReply)
+		s.api.GET("/messaging/macros", s.listEmailMacros)
+		s.api.POST("/messaging/macros", s.createEmailMacro)
+		s.api.PUT("/messaging/macros/:macroId", s.updateEmailMacro)
+		s.api.DELETE("/messaging/macros/:macroId", s.deleteEmailMacro)
 		s.authenticated.POST("/setup/organizations", s.createOrganization)
 		s.authenticated.POST("/auth/provision", s.provisionIdentity)
 		s.authenticated.GET("/setup/status", s.checkSetupStatus)
@@ -219,6 +241,7 @@ func (s *Server) registerRoutes() {
 	s.echo.GET("/api/v1/public/jobs", s.listPublicJobs)
 	s.echo.GET("/api/v1/public/company", s.getPublicCompany)
 	s.echo.POST("/api/v1/public/upload-resume", s.uploadPublicResume)
+	s.echo.POST("/api/v1/messaging/inbound/webhook", s.inboundEmailWebhook)
 	s.echo.POST("/api/v1/public/jobs/:postingId/apply", s.applyForJob)
 }
 
@@ -574,13 +597,100 @@ func (s *Server) listLeaveRequests(c echo.Context) error {
 		Status:            c.QueryParam("status"),
 		Cursor:            c.QueryParam("cursor"),
 		Limit:             limit,
-		CanApproveManager: principal.HasPermission("leave:approve_manager"),
-		CanApproveHR:      principal.HasPermission("leave:approve_hr"),
+		CanApproveManager: principal.HasPermission("leave:approve_manager") || principal.HasPermission("organization:manage"),
+		CanApproveHR:      principal.HasPermission("leave:approve_hr") || principal.HasPermission("organization:manage"),
 	})
 	if err != nil {
 		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_leave_request_filter", "Invalid leave request filter", err.Error())
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) getLeaveOverview(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+
+	ctx := c.Request().Context()
+	orgID := principal.OrganizationID
+	userID := principal.UserID
+
+	// 1. Current Employee
+	var userEmail string
+	_ = s.pool.QueryRow(ctx, "SELECT email FROM users WHERE id = $1", userID).Scan(&userEmail)
+	prof, err := s.people.GetByUserID(ctx, orgID, userID, userEmail)
+	var empID string
+	if err == nil {
+		empID = prof.ID
+	}
+
+	// 2. Fetch Types, Policies, Balances, and Requests in parallel
+	var (
+		types    []timeoff.LeaveType
+		policies []timeoff.PolicyDetail
+		balances []timeoff.Balance
+		requests []timeoff.LeaveRequest
+		wg       sync.WaitGroup
+	)
+
+	wg.Add(4)
+
+	go func() {
+		defer wg.Done()
+		t, err := s.timeOff.ListLeaveTypes(ctx, orgID)
+		if err == nil && t != nil {
+			types = t
+		} else {
+			types = []timeoff.LeaveType{}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		p, err := s.timeOff.ListPolicies(ctx, orgID)
+		if err == nil && p != nil {
+			policies = p
+		} else {
+			policies = []timeoff.PolicyDetail{}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		if empID != "" {
+			b, _ := s.timeOff.ListBalances(ctx, orgID, empID)
+			if b != nil {
+				balances = b
+				return
+			}
+		}
+		balances = []timeoff.Balance{}
+	}()
+
+	go func() {
+		defer wg.Done()
+		requestsPage, err := s.timeOff.ListRequests(ctx, orgID, userID, timeoff.ListRequestsInput{
+			Limit:             100,
+			CanApproveManager: principal.HasPermission("leave:approve_manager") || principal.HasPermission("organization:manage"),
+			CanApproveHR:      principal.HasPermission("leave:approve_hr") || principal.HasPermission("organization:manage"),
+		})
+		if err == nil && requestsPage.Data != nil {
+			requests = requestsPage.Data
+		} else {
+			requests = []timeoff.LeaveRequest{}
+		}
+	}()
+
+	wg.Wait()
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"currentEmployee": prof,
+		"leaveTypes":      types,
+		"policies":        policies,
+		"balances":        balances,
+		"requests":        requests,
+	})
 }
 
 func (s *Server) listLeaveBalances(c echo.Context) error {
@@ -740,7 +850,7 @@ func (s *Server) createAttendancePunch(c echo.Context) error {
 	if !ok {
 		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
 	}
-	if !principal.HasPermission("attendance:punch_self") {
+	if !principal.HasPermission("attendance:punch_self") && !principal.HasPermission("attendance:manage") && !principal.HasPermission("organization:manage") && !principal.HasPermission("employees:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to record attendance punches")
 	}
 	var input attendance.CreatePunchInput
@@ -759,7 +869,7 @@ func (s *Server) createLeavePolicy(c echo.Context) error {
 	if !ok {
 		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
 	}
-	if !principal.HasPermission("leave:manage_policies") {
+	if !principal.HasPermission("leave:manage_policies") && !principal.HasPermission("organization:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage leave policies")
 	}
 	var input timeoff.CreatePolicyInput
@@ -783,7 +893,7 @@ func (s *Server) assignLeavePolicy(c echo.Context) error {
 	if !ok {
 		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
 	}
-	if !principal.HasPermission("leave:manage_policies") {
+	if !principal.HasPermission("leave:manage_policies") && !principal.HasPermission("organization:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to assign leave policies")
 	}
 	var input timeoff.AssignPolicyInput
@@ -803,7 +913,7 @@ func (s *Server) createLeaveType(c echo.Context) error {
 	if !ok {
 		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
 	}
-	if !principal.HasPermission("leave:manage_policies") {
+	if !principal.HasPermission("leave:manage_policies") && !principal.HasPermission("organization:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage leave types")
 	}
 	var input timeoff.CreateLeaveTypeInput
@@ -818,6 +928,98 @@ func (s *Server) createLeaveType(c echo.Context) error {
 		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_leave_type", "Invalid leave type", err.Error())
 	}
 	return c.JSON(http.StatusCreated, result)
+}
+
+func (s *Server) updateLeaveType(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	if !principal.HasPermission("leave:manage_policies") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage leave types")
+	}
+	var input timeoff.UpdateLeaveTypeInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_json", "Invalid request", "Request body must be valid JSON")
+	}
+	typeID := c.Param("typeId")
+	result, err := s.timeOff.UpdateLeaveType(c.Request().Context(), principal.OrganizationID, typeID, input)
+	if err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_leave_type", "Invalid leave type", err.Error())
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listLeaveTypes(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	types, err := s.timeOff.ListLeaveTypes(c.Request().Context(), principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "leave.list_types_failed", "Failed to list leave types", err.Error())
+	}
+	return c.JSON(http.StatusOK, types)
+}
+
+func (s *Server) listLeavePolicies(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	policies, err := s.timeOff.ListPolicies(c.Request().Context(), principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "leave.list_policies_failed", "Failed to list leave policies", err.Error())
+	}
+	return c.JSON(http.StatusOK, policies)
+}
+
+func (s *Server) assignLeavePolicyToAll(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	if !principal.HasPermission("leave:manage_policies") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to assign leave policies")
+	}
+	policyID := c.Param("policyId")
+	if err := s.timeOff.AssignPolicyToAll(c.Request().Context(), principal.OrganizationID, principal.UserID, policyID); err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "leave.assign_policy_failed", "Failed to assign policy", err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) runMonthlyAccrual(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	if !principal.HasPermission("leave:manage_policies") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to run accruals")
+	}
+	count, err := s.timeOff.RunMonthlyAccrual(c.Request().Context(), principal.OrganizationID, principal.UserID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "leave.accrual_failed", "Accrual failed", err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]int{"creditsApplied": count})
+}
+
+func (s *Server) createLeaveAdjustment(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	if !principal.HasPermission("leave:manage_policies") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to create leave adjustments")
+	}
+	var input timeoff.CreateAdjustmentInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_json", "Invalid request", "Request body must be valid JSON")
+	}
+	if err := s.timeOff.CreateAdjustment(c.Request().Context(), principal.OrganizationID, principal.UserID, input); err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "leave.adjustment_failed", "Adjustment failed", err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
 }
 
 func (s *Server) approveLeaveRequestHR(c echo.Context) error {
@@ -1320,7 +1522,7 @@ func (s *Server) getLiveAttendance(c echo.Context) error {
 	if !ok {
 		return c.NoContent(http.StatusUnauthorized)
 	}
-	if !principal.HasPermission("attendance:read_team") && !principal.HasPermission("attendance:manage") {
+	if !principal.HasPermission("attendance:read_team") && !principal.HasPermission("attendance:manage") && !principal.HasPermission("attendance:read") && !principal.HasPermission("organization:read") && !principal.HasPermission("employees:read") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view live attendance")
 	}
 	var input attendance.LiveAttendanceInput
@@ -1647,7 +1849,8 @@ func (s *Server) applyForJob(c echo.Context) error {
 		if errors.Is(err, hiring.ErrNotFound) {
 			return problem(c, http.StatusNotFound, "hiring.posting_not_found", "Not found", "Job posting not found or not active")
 		}
-		return problem(c, http.StatusInternalServerError, "hiring.apply_failed", "Internal server error", "Could not submit application")
+		slog.Error("failed to apply for job", "error", err, "postingId", c.Param("postingId"))
+		return problem(c, http.StatusInternalServerError, "hiring.apply_failed", "Internal server error", err.Error())
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -1658,7 +1861,7 @@ func (s *Server) listJobPostings(c echo.Context) error {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
-	if !principal.HasPermission("hiring:read") {
+	if !principal.HasPermission("hiring:read") && !principal.HasPermission("organization:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view job postings")
 	}
 	result, err := s.hiring.ListPostings(c.Request().Context(), principal.OrganizationID)
@@ -1674,7 +1877,7 @@ func (s *Server) createJobPosting(c echo.Context) error {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
-	if !principal.HasPermission("hiring:manage") {
+	if !principal.HasPermission("hiring:manage") && !principal.HasPermission("organization:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage hiring")
 	}
 	var input hiring.CreateJobPostingInput
@@ -1694,7 +1897,7 @@ func (s *Server) createJobOffer(c echo.Context) error {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
-	if !principal.HasPermission("hiring:manage") {
+	if !principal.HasPermission("hiring:manage") && !principal.HasPermission("organization:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage hiring")
 	}
 	var input hiring.CreateOfferInput
@@ -1716,7 +1919,7 @@ func (s *Server) updateJobPostingStatus(c echo.Context) error {
 	if !ok {
 		return c.NoContent(http.StatusUnauthorized)
 	}
-	if !principal.HasPermission("hiring:manage") {
+	if !principal.HasPermission("hiring:manage") && !principal.HasPermission("organization:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage job postings")
 	}
 	var body struct {
@@ -1739,7 +1942,7 @@ func (s *Server) listJobApplicants(c echo.Context) error {
 	if !ok {
 		return c.NoContent(http.StatusUnauthorized)
 	}
-	if !principal.HasPermission("hiring:read") {
+	if !principal.HasPermission("hiring:read") && !principal.HasPermission("organization:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view applicants")
 	}
 	result, err := s.hiring.ListApplicants(c.Request().Context(), principal.OrganizationID, c.Param("postingId"))
@@ -1757,7 +1960,7 @@ func (s *Server) listAllApplicants(c echo.Context) error {
 	if !ok {
 		return c.NoContent(http.StatusUnauthorized)
 	}
-	if !principal.HasPermission("hiring:read") {
+	if !principal.HasPermission("hiring:read") && !principal.HasPermission("organization:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view applicants")
 	}
 	result, err := s.hiring.ListAllApplicants(c.Request().Context(), principal.OrganizationID)
@@ -1772,7 +1975,7 @@ func (s *Server) updateApplicantStatus(c echo.Context) error {
 	if !ok {
 		return c.NoContent(http.StatusUnauthorized)
 	}
-	if !principal.HasPermission("hiring:manage") {
+	if !principal.HasPermission("hiring:manage") && !principal.HasPermission("organization:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage applicants")
 	}
 	var body struct {
@@ -2753,4 +2956,276 @@ func (s *Server) listPlatformAuditLogs(c echo.Context) error {
 		return problem(c, http.StatusInternalServerError, "audit.list_failed", "Internal error", "Could not fetch audit logs")
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+// ─── Messaging Handlers ──────────────────────────────────────────────────────
+
+func (s *Server) createEmailThread(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	if !principal.HasPermission("hiring:manage") && !principal.HasPermission("hiring:read") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to send emails to candidates")
+	}
+	var input struct {
+		ApplicantID    string `json:"applicantId"`
+		Subject        string `json:"subject"`
+		BodyHTML       string `json:"bodyHtml"`
+		CandidateEmail string `json:"candidateEmail"`
+		CandidateName  string `json:"candidateName"`
+		SenderName     string `json:"senderName"`
+		SenderEmail    string `json:"senderEmail"`
+	}
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_json", "Invalid request", "Request body must be valid JSON")
+	}
+	if input.ApplicantID == "" || input.Subject == "" || input.BodyHTML == "" || input.CandidateEmail == "" {
+		return problem(c, http.StatusUnprocessableEntity, "validation.missing_fields", "Missing required fields", "applicantId, subject, bodyHtml, and candidateEmail are required")
+	}
+	if input.SenderName == "" {
+		input.SenderName = "Hiring Team"
+	}
+
+	thread, err := s.messaging.CreateThread(c.Request().Context(), principal.OrganizationID, input.ApplicantID, principal.UserID, messaging.SendEmailInput{
+		Subject:        input.Subject,
+		BodyHTML:       input.BodyHTML,
+		CandidateEmail: input.CandidateEmail,
+		CandidateName:  input.CandidateName,
+		SenderName:     input.SenderName,
+		SenderEmail:    input.SenderEmail,
+	})
+	if err != nil {
+		slog.Error("create thread failed", "err", err)
+		return problem(c, http.StatusInternalServerError, "messaging.create_thread_failed", "Failed to create thread", err.Error())
+	}
+	return c.JSON(http.StatusCreated, thread)
+}
+
+func (s *Server) listEmailThreads(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Context missing")
+	}
+	if !principal.HasPermission("hiring:manage") && !principal.HasPermission("hiring:read") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "Insufficient permission")
+	}
+	applicantID := strings.TrimSpace(c.QueryParam("applicantId"))
+	threads, err := s.messaging.ListThreads(c.Request().Context(), principal.OrganizationID, applicantID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "messaging.list_threads_failed", "Failed to list threads", err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": threads})
+}
+
+func (s *Server) getEmailThreadMessages(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Context missing")
+	}
+	if !principal.HasPermission("hiring:manage") && !principal.HasPermission("hiring:read") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "Insufficient permission")
+	}
+	threadID := c.Param("threadId")
+	msgs, err := s.messaging.GetThreadMessages(c.Request().Context(), principal.OrganizationID, threadID)
+	if errors.Is(err, messaging.ErrNotFound) {
+		return problem(c, http.StatusNotFound, "messaging.thread_not_found", "Thread not found", "Thread not found")
+	}
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "messaging.get_messages_failed", "Failed to get messages", err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": msgs})
+}
+
+func (s *Server) replyToEmailThread(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Context missing")
+	}
+	if !principal.HasPermission("hiring:manage") && !principal.HasPermission("hiring:read") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "Insufficient permission")
+	}
+	var input struct {
+		BodyHTML    string `json:"bodyHtml"`
+		SenderName  string `json:"senderName"`
+		SenderEmail string `json:"senderEmail"`
+		SenderType  string `json:"senderType"` // "recruiter" | "candidate"
+	}
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_json", "Invalid request", "Request body must be valid JSON")
+	}
+	if strings.TrimSpace(input.BodyHTML) == "" {
+		return problem(c, http.StatusUnprocessableEntity, "validation.missing_body", "Missing body", "bodyHtml is required")
+	}
+	threadID := c.Param("threadId")
+
+	var msg messaging.EmailMessage
+	var err error
+	if strings.ToLower(input.SenderType) == "candidate" {
+		msg, err = s.messaging.RecordCandidateReply(c.Request().Context(), principal.OrganizationID, threadID, input.SenderName, input.BodyHTML)
+	} else {
+		if input.SenderName == "" {
+			input.SenderName = "Hiring Team"
+		}
+		msg, err = s.messaging.ReplyToThread(c.Request().Context(), principal.OrganizationID, threadID, principal.UserID, input.SenderName, input.SenderEmail, input.BodyHTML)
+	}
+
+	if errors.Is(err, messaging.ErrNotFound) {
+		return problem(c, http.StatusNotFound, "messaging.thread_not_found", "Thread not found", "Thread not found")
+	}
+	if err != nil {
+		slog.Error("reply to thread failed", "err", err)
+		return problem(c, http.StatusInternalServerError, "messaging.reply_failed", "Failed to send reply", err.Error())
+	}
+	return c.JSON(http.StatusCreated, msg)
+}
+
+func (s *Server) recordCandidateReply(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Context missing")
+	}
+	var input struct {
+		BodyHTML   string `json:"bodyHtml"`
+		SenderName string `json:"senderName"`
+	}
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_json", "Invalid request", "Request body must be valid JSON")
+	}
+	if strings.TrimSpace(input.BodyHTML) == "" {
+		return problem(c, http.StatusUnprocessableEntity, "validation.missing_body", "Missing body", "bodyHtml is required")
+	}
+	threadID := c.Param("threadId")
+	msg, err := s.messaging.RecordCandidateReply(c.Request().Context(), principal.OrganizationID, threadID, input.SenderName, input.BodyHTML)
+	if errors.Is(err, messaging.ErrNotFound) {
+		return problem(c, http.StatusNotFound, "messaging.thread_not_found", "Thread not found", "Thread not found")
+	}
+	if err != nil {
+		slog.Error("record candidate reply failed", "err", err)
+		return problem(c, http.StatusInternalServerError, "messaging.candidate_reply_failed", "Failed to record candidate reply", err.Error())
+	}
+	return c.JSON(http.StatusCreated, msg)
+}
+
+// Inbound email webhook for receiving external replies (e.g. from Resend Inbound, SendGrid, Mailgun)
+func (s *Server) inboundEmailWebhook(c echo.Context) error {
+	var input struct {
+		ThreadID    string `json:"threadId"`
+		SenderEmail string `json:"senderEmail"`
+		SenderName  string `json:"senderName"`
+		Subject     string `json:"subject"`
+		BodyHTML    string `json:"bodyHtml"`
+		From        string `json:"from"`
+		Text        string `json:"text"`
+		HTML        string `json:"html"`
+	}
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_json", "Invalid request", "Request body must be valid JSON")
+	}
+
+	body := input.BodyHTML
+	if body == "" {
+		body = input.HTML
+	}
+	if body == "" {
+		body = input.Text
+	}
+	if strings.TrimSpace(body) == "" {
+		body = "<p>No content</p>"
+	}
+
+	senderEmail := input.SenderEmail
+	senderName := input.SenderName
+	if senderEmail == "" && input.From != "" {
+		senderEmail = input.From
+		senderName = input.From
+	}
+
+	msg, err := s.messaging.InboundWebhookMessage(c.Request().Context(), input.ThreadID, senderEmail, senderName, input.Subject, body)
+	if errors.Is(err, messaging.ErrNotFound) {
+		return problem(c, http.StatusNotFound, "messaging.thread_not_found", "Thread not found", "No matching thread found for inbound message")
+	}
+	if err != nil {
+		slog.Error("inbound webhook message failed", "err", err)
+		return problem(c, http.StatusInternalServerError, "messaging.inbound_failed", "Failed to process inbound message", err.Error())
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{"success": true, "message": msg})
+}
+
+func (s *Server) listEmailMacros(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Context missing")
+	}
+	macros, err := s.messaging.ListMacros(c.Request().Context(), principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "messaging.list_macros_failed", "Failed to list macros", err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": macros})
+}
+
+func (s *Server) createEmailMacro(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Context missing")
+	}
+	if !principal.HasPermission("hiring:manage") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "Insufficient permission")
+	}
+	var input messaging.CreateMacroInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_json", "Invalid request", "Request body must be valid JSON")
+	}
+	if input.Title == "" || input.Shortcut == "" || input.Subject == "" {
+		return problem(c, http.StatusUnprocessableEntity, "validation.missing_fields", "Missing fields", "title, shortcut, and subject are required")
+	}
+	if input.Category == "" {
+		input.Category = "hiring"
+	}
+	macro, err := s.messaging.CreateMacro(c.Request().Context(), principal.OrganizationID, principal.UserID, input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "messaging.create_macro_failed", "Failed to create macro", err.Error())
+	}
+	return c.JSON(http.StatusCreated, macro)
+}
+
+func (s *Server) updateEmailMacro(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Context missing")
+	}
+	if !principal.HasPermission("hiring:manage") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "Insufficient permission")
+	}
+	var input messaging.UpdateMacroInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_json", "Invalid request", "Request body must be valid JSON")
+	}
+	macroID := c.Param("macroId")
+	macro, err := s.messaging.UpdateMacro(c.Request().Context(), principal.OrganizationID, macroID, input)
+	if errors.Is(err, messaging.ErrNotFound) {
+		return problem(c, http.StatusNotFound, "messaging.macro_not_found", "Macro not found", "Macro not found")
+	}
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "messaging.update_macro_failed", "Failed to update macro", err.Error())
+	}
+	return c.JSON(http.StatusOK, macro)
+}
+
+func (s *Server) deleteEmailMacro(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Context missing")
+	}
+	if !principal.HasPermission("hiring:manage") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "Insufficient permission")
+	}
+	macroID := c.Param("macroId")
+	if err := s.messaging.DeleteMacro(c.Request().Context(), principal.OrganizationID, macroID); errors.Is(err, messaging.ErrNotFound) {
+		return problem(c, http.StatusNotFound, "messaging.macro_not_found", "Macro not found", "Macro not found")
+	} else if err != nil {
+		return problem(c, http.StatusInternalServerError, "messaging.delete_macro_failed", "Failed to delete macro", err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
 }

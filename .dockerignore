@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+.env.*
+*.log
+bin/
+tmp/
+cmd/perfbench/
+cmd/seed_bench/
+.DS_Store

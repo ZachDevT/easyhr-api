@@ -1,25 +1,26 @@
 package identity
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/clerk/clerk-sdk-go/v2"
 )
 
-func TestVerifiedUserProfile(t *testing.T) {
+func TestExtractUserProfile(t *testing.T) {
 	firstName, lastName, primaryID := "Amina", "Hassan", "email_1"
 	user := &clerk.User{FirstName: &firstName, LastName: &lastName, PrimaryEmailAddressID: &primaryID, EmailAddresses: []*clerk.EmailAddress{{ID: primaryID, EmailAddress: "amina@example.com", Verification: &clerk.Verification{Status: "verified"}}}}
-	gotFirst, gotLast, gotEmail, err := verifiedUserProfile(user)
-	if err != nil || gotFirst != firstName || gotLast != lastName || gotEmail != "amina@example.com" {
-		t.Fatalf("verifiedUserProfile() = %q, %q, %q, %v", gotFirst, gotLast, gotEmail, err)
+	gotFirst, gotLast, gotEmail := extractUserProfile(user)
+	if gotFirst != firstName || gotLast != lastName || gotEmail != "amina@example.com" {
+		t.Fatalf("extractUserProfile() = %q, %q, %q", gotFirst, gotLast, gotEmail)
 	}
 }
 
-func TestVerifiedUserProfileRejectsUnverifiedPrimaryEmail(t *testing.T) {
-	firstName, lastName, primaryID := "Amina", "Hassan", "email_1"
-	user := &clerk.User{FirstName: &firstName, LastName: &lastName, PrimaryEmailAddressID: &primaryID, EmailAddresses: []*clerk.EmailAddress{{ID: primaryID, EmailAddress: "amina@example.com", Verification: &clerk.Verification{Status: "unverified"}}}}
-	if _, _, _, err := verifiedUserProfile(user); !errors.Is(err, ErrIdentityProfileIncomplete) {
-		t.Fatalf("verifiedUserProfile() error = %v, want incomplete profile error", err)
+func TestExtractUserProfileFallbackToAnyEmail(t *testing.T) {
+	firstName, lastName := "Amina", "Hassan"
+	user := &clerk.User{FirstName: &firstName, LastName: &lastName, EmailAddresses: []*clerk.EmailAddress{{ID: "email_2", EmailAddress: "amina2@example.com"}}}
+	gotFirst, gotLast, gotEmail := extractUserProfile(user)
+	if gotFirst != firstName || gotLast != lastName || gotEmail != "amina2@example.com" {
+		t.Fatalf("extractUserProfile() = %q, %q, %q", gotFirst, gotLast, gotEmail)
 	}
 }
+

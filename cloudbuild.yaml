@@ -1,0 +1,35 @@
+steps:
+  # Step 1: Build the container image using the multi-stage Dockerfile
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/easyhr-api:$COMMIT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/easyhr-api:latest'
+      - '.'
+
+  # Step 2: Push images to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/easyhr-api:$COMMIT_SHA']
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/easyhr-api:latest']
+
+  # Step 3: Deploy to Google Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'easyhr-api'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/easyhr-api:$COMMIT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+
+images:
+  - 'gcr.io/$PROJECT_ID/easyhr-api:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/easyhr-api:latest'

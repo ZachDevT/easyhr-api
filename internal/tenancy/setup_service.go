@@ -120,7 +120,7 @@ func (service *SetupService) CreateOrganization(ctx context.Context, externalIde
 	if _, err := tx.Exec(ctx, `
         INSERT INTO role_permissions (role_id, permission_key)
         SELECT $1, key FROM permissions
-        WHERE key IN ('organization:read', 'organization:manage', 'memberships:manage', 'employees:read', 'employees:manage', 'documents:manage', 'documents:upload', 'documents:read')`, ownerRoleID); err != nil {
+        ON CONFLICT DO NOTHING`, ownerRoleID); err != nil {
 		return SetupResult{}, fmt.Errorf("grant owner permissions: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO membership_roles (membership_id, role_id) VALUES ($1, $2)`, result.MembershipID, ownerRoleID); err != nil {
