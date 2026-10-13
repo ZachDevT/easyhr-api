@@ -2,6 +2,7 @@ package timeoff
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -83,7 +84,11 @@ func (service *Service) CreatePolicy(ctx context.Context, org, actor string, inp
 		}
 		return LeavePolicy{}, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_policy.created','leave_policy',$3,'unknown',jsonb_build_object('accrualMinutes',$4::int,'allowsNegativeBalance',$5::boolean))`, org, actor, result.ID, result.AccrualMinutes, result.AllowsNegativeBalance)
+	auditMeta, _ := json.Marshal(map[string]any{
+		"accrualMinutes":        result.AccrualMinutes,
+		"allowsNegativeBalance": result.AllowsNegativeBalance,
+	})
+	_, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_policy.created','leave_policy',$3,'unknown',$4::jsonb)`, org, actor, result.ID, auditMeta)
 	if err != nil {
 		return LeavePolicy{}, err
 	}
@@ -126,7 +131,8 @@ func (service *Service) AssignPolicy(ctx context.Context, org, actor, policyID s
 	if _, err = tx.Exec(ctx, `INSERT INTO leave_policy_assignments (employee_id,leave_policy_id,effective_from,created_by_user_id) VALUES ($1,$2,$3,$4)`, input.EmployeeID, policyID, input.EffectiveFrom, actor); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_policy.assigned','leave_policy',$3,'unknown',jsonb_build_object('employeeId',$4::text))`, org, actor, policyID, input.EmployeeID)
+	assignMeta, _ := json.Marshal(map[string]any{"employeeId": input.EmployeeID})
+	_, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_policy.assigned','leave_policy',$3,'unknown',$4::jsonb)`, org, actor, policyID, assignMeta)
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package timeoff
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -77,7 +78,8 @@ func (service *Service) Decline(ctx context.Context, organizationID, actorUserID
 	if _, err = tx.Exec(ctx, `UPDATE leave_requests SET status = 'declined', updated_at = now() WHERE id = $1`, requestID); err != nil {
 		return DecisionResult{}, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id, actor_user_id, action, resource_type, resource_id, request_id, metadata) VALUES ($1, $2, 'leave_request.declined', 'leave_request', $3, 'unknown', jsonb_build_object('stage', $4::text))`, organizationID, actorUserID, requestID, stage); err != nil {
+	declineMeta, _ := json.Marshal(map[string]any{"stage": stage})
+	if _, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id, actor_user_id, action, resource_type, resource_id, request_id, metadata) VALUES ($1, $2, 'leave_request.declined', 'leave_request', $3, 'unknown', $4::jsonb)`, organizationID, actorUserID, requestID, declineMeta); err != nil {
 		return DecisionResult{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

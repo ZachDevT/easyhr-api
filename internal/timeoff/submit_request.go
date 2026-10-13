@@ -2,6 +2,7 @@ package timeoff
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -81,7 +82,8 @@ func (service *Service) Submit(ctx context.Context, organizationID, actorUserID 
 	if _, err := tx.Exec(ctx, `INSERT INTO leave_ledger_entries (organization_id,employee_id,leave_type_id,entry_type,minutes,effective_on,source_type,source_id,note,created_by_user_id) VALUES ($1,$2,$3,'reservation',$4,$5,'leave_request',$6,'Leave request reservation',$7)`, organizationID, input.EmployeeID, input.LeaveTypeID, -input.RequestedMinutes, input.StartDate, result.ID, actorUserID); err != nil {
 		return LeaveRequest{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_request.submitted','leave_request',$3,'unknown',jsonb_build_object('requestedMinutes',$4::int))`, organizationID, actorUserID, result.ID, input.RequestedMinutes); err != nil {
+	submitMeta, _ := json.Marshal(map[string]any{"requestedMinutes": input.RequestedMinutes})
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_request.submitted','leave_request',$3,'unknown',$4::jsonb)`, organizationID, actorUserID, result.ID, submitMeta); err != nil {
 		return LeaveRequest{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

@@ -136,20 +136,23 @@ func (service *SetupService) CreateOrganization(ctx context.Context, externalIde
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO roles (organization_id, key, display_name, is_system)
 		VALUES ($1, 'employee', 'Employee', true)
-		ON CONFLICT (organization_id, key) DO UPDATE SET is_system = true
-		RETURNING id::text`, result.OrganizationID).Scan(&employeeRoleID); err == nil {
-		_, _ = tx.Exec(ctx, `
-			INSERT INTO role_permissions (role_id, permission_key)
-			VALUES ($1, 'organization:read'), ($1, 'employees:read')
-			ON CONFLICT DO NOTHING`, employeeRoleID)
+		RETURNING id::text`, result.OrganizationID).Scan(&employeeRoleID); err != nil {
+		return SetupResult{}, normalizeSetupError(err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO role_permissions (role_id, permission_key)
+		VALUES ($1, 'organization:read'), ($1, 'employees:read')
+		ON CONFLICT DO NOTHING`, employeeRoleID); err != nil {
+		return SetupResult{}, fmt.Errorf("grant employee permissions: %w", err)
 	}
 
 	var hrRoleID string
-	_ = tx.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		INSERT INTO roles (organization_id, key, display_name, is_system)
 		VALUES ($1, 'hr_manager', 'HR Manager', true)
-		ON CONFLICT (organization_id, key) DO UPDATE SET is_system = true
-		RETURNING id::text`, result.OrganizationID).Scan(&hrRoleID)
+		RETURNING id::text`, result.OrganizationID).Scan(&hrRoleID); err != nil {
+		return SetupResult{}, normalizeSetupError(err)
+	}
 	for _, department := range input.InitialDepartments {
 		deptName := strings.TrimSpace(department)
 		deptCode := strings.ToUpper(strings.ReplaceAll(deptName, " ", "_"))

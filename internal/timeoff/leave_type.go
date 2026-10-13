@@ -2,6 +2,7 @@ package timeoff
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -132,7 +133,11 @@ func (service *Service) CreateLeaveType(ctx context.Context, organizationID, act
 	}
 
 	result.ID = typeID
-	_, _ = service.pool.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_type.saved','leave_type',$3,'unknown',jsonb_build_object('paid',$4::boolean,'unit',$5::text))`, organizationID, actorUserID, result.ID, result.IsPaid, result.Unit)
+	leaveTypeMeta, _ := json.Marshal(map[string]any{
+		"paid": result.IsPaid,
+		"unit": result.Unit,
+	})
+	_, _ = service.pool.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_type.saved','leave_type',$3,'unknown',$4::jsonb)`, organizationID, actorUserID, result.ID, leaveTypeMeta)
 	return result, nil
 }
 
