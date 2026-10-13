@@ -69,6 +69,15 @@ func (resolver *Resolver) Middleware(next http.Handler) http.Handler {
 				WHERE u.external_identity_id = $1
 				LIMIT 1`, claims.Subject).Scan(&workspace)
 			if err != nil {
+				_ = resolver.pool.QueryRow(request.Context(), `
+					SELECT w.subdomain
+					FROM users u
+					JOIN employees e ON (e.user_id = u.id OR LOWER(e.work_email) = LOWER(u.email))
+					JOIN workspaces w ON w.organization_id = e.organization_id
+					WHERE u.external_identity_id = $1
+					LIMIT 1`, claims.Subject).Scan(&workspace)
+			}
+			if workspace == "" {
 				writeProblem(writer, request, http.StatusForbidden, "membership.not_active", "Forbidden", "No active organization workspace exists for this account")
 				return
 			}
