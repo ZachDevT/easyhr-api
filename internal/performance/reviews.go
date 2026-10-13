@@ -43,9 +43,16 @@ func (service *Service) ListReviews(ctx context.Context, organizationID string, 
 			r.created_at::text
 		FROM performance_reviews r
 		JOIN employees e ON e.id = r.employee_id
-		LEFT JOIN departments d ON d.id = e.department_id
+		LEFT JOIN LATERAL (
+			SELECT department_id
+			FROM employment_assignments
+			WHERE employee_id = e.id AND effective_to IS NULL
+			ORDER BY effective_from DESC
+			LIMIT 1
+		) ea ON true
+		LEFT JOIN departments d ON d.id = ea.department_id
 		LEFT JOIN users u ON u.id = r.reviewer_user_id
-		WHERE r.organization_id = $1 AND ($2::uuid IS NULL OR r.employee_id = $2::uuid)
+		WHERE r.organization_id = $1 AND ($2::text IS NULL OR $2::text = '' OR r.employee_id::text = $2::text)
 		ORDER BY r.created_at DESC
 	`
 	rows, err := service.pool.Query(ctx, query, organizationID, employeeID)
@@ -81,7 +88,14 @@ func (service *Service) CreateReview(ctx context.Context, organizationID, actorU
 			e.last_name, 
 			d.name 
 		FROM employees e 
-		LEFT JOIN departments d ON d.id = e.department_id 
+		LEFT JOIN LATERAL (
+			SELECT department_id
+			FROM employment_assignments
+			WHERE employee_id = e.id AND effective_to IS NULL
+			ORDER BY effective_from DESC
+			LIMIT 1
+		) ea ON true
+		LEFT JOIN departments d ON d.id = ea.department_id 
 		WHERE e.id = $1 AND e.organization_id = $2
 	`, employeeID, organizationID).Scan(&exists, &firstName, &lastName, &deptName)
 	if err != nil || !exists {

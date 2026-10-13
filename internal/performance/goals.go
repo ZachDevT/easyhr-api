@@ -40,7 +40,14 @@ func (service *Service) ListGoals(ctx context.Context, organizationID, employeeI
 			g.created_at::text
 		FROM performance_goals g
 		JOIN employees e ON e.id = g.employee_id
-		LEFT JOIN departments d ON d.id = e.department_id
+		LEFT JOIN LATERAL (
+			SELECT department_id
+			FROM employment_assignments
+			WHERE employee_id = e.id AND effective_to IS NULL
+			ORDER BY effective_from DESC
+			LIMIT 1
+		) ea ON true
+		LEFT JOIN departments d ON d.id = ea.department_id
 		WHERE g.organization_id = $1 AND g.employee_id = $2 
 		ORDER BY g.created_at DESC
 	`, organizationID, employeeID)
@@ -79,7 +86,14 @@ func (service *Service) ListAllGoals(ctx context.Context, organizationID string)
 			g.created_at::text
 		FROM performance_goals g
 		JOIN employees e ON e.id = g.employee_id
-		LEFT JOIN departments d ON d.id = e.department_id
+		LEFT JOIN LATERAL (
+			SELECT department_id
+			FROM employment_assignments
+			WHERE employee_id = e.id AND effective_to IS NULL
+			ORDER BY effective_from DESC
+			LIMIT 1
+		) ea ON true
+		LEFT JOIN departments d ON d.id = ea.department_id
 		WHERE g.organization_id = $1 
 		ORDER BY g.created_at DESC
 	`, organizationID)
@@ -114,7 +128,14 @@ func (service *Service) CreateGoal(ctx context.Context, organizationID, actorUse
 			e.last_name, 
 			d.name 
 		FROM employees e 
-		LEFT JOIN departments d ON d.id = e.department_id 
+		LEFT JOIN LATERAL (
+			SELECT department_id
+			FROM employment_assignments
+			WHERE employee_id = e.id AND effective_to IS NULL
+			ORDER BY effective_from DESC
+			LIMIT 1
+		) ea ON true
+		LEFT JOIN departments d ON d.id = ea.department_id 
 		WHERE e.id = $1 AND e.organization_id = $2
 	`, employeeID, organizationID).Scan(&exists, &firstName, &lastName, &deptName)
 	if err != nil || !exists {

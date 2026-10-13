@@ -553,7 +553,10 @@ func (s *Server) listAttendancePunches(c echo.Context) error {
 	}
 	employeeID := strings.TrimSpace(c.QueryParam("employeeId"))
 	if employeeID == "" {
-		return problem(c, http.StatusUnprocessableEntity, "validation.employee_id_required", "Employee required", "employeeId is required")
+		_ = s.pool.QueryRow(c.Request().Context(), "SELECT id FROM employees WHERE user_id = $1 AND organization_id = $2", principal.UserID, principal.OrganizationID).Scan(&employeeID)
+	}
+	if employeeID == "" {
+		return c.JSON(http.StatusOK, attendance.PunchPage{Data: []attendance.Punch{}})
 	}
 	isSelf, err := s.people.IsEmployeeUser(c.Request().Context(), principal.OrganizationID, employeeID, principal.UserID)
 	if err != nil {
