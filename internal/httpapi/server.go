@@ -308,6 +308,39 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/relations/cases", s.createRelationCase)
 		s.api.POST("/relations/cases/:caseId/actions", s.executeRelationAction)
 
+		// Roles & Permissions
+		s.api.GET("/roles", s.listRoles)
+		s.api.POST("/roles", s.createRole)
+		s.api.PUT("/roles/:id/permissions", s.updateRolePermissions)
+		s.api.POST("/roles/assign/:employeeId", s.assignRoleToEmployee)
+		s.api.GET("/permissions", s.listPermissions)
+
+		// Payroll
+		s.api.GET("/payroll/configurations", s.listPayrollConfigurations)
+		s.api.POST("/payroll/configurations", s.createPayrollConfiguration)
+		s.api.GET("/payroll/periods", s.listPayrollPeriods)
+		s.api.POST("/payroll/periods", s.createPayrollPeriod)
+		s.api.GET("/payroll/periods/:periodId/runs", s.listPayrollRunsForPeriod)
+		s.api.POST("/payroll/periods/:periodId/runs", s.createPayrollRun)
+		s.api.GET("/payroll/runs/:runId/items", s.listPayrollRunItems)
+		s.api.POST("/payroll/runs/:runId/lock", s.lockPayrollRun)
+
+		// Policies
+		s.api.GET("/policies", s.listPolicies)
+		s.api.POST("/policies", s.createPolicy)
+
+		// Support
+		s.api.GET("/support/tickets", s.listTenantTickets)
+		s.api.POST("/support/tickets", s.createTenantTicket)
+		s.api.POST("/support/tickets/:id/messages", s.addTenantTicketMessage)
+		s.api.GET("/support/tickets/:id/messages", s.listTenantTicketMessages)
+		s.api.PATCH("/support/tickets/:id/status", s.updateTenantTicketStatus)
+
+		// Operations & Signatures
+		s.api.POST("/documents/:documentId/signatures", s.createSignatureRequest)
+		s.api.POST("/operations/data-jobs", s.createTenantDataJob)
+		s.api.GET("/operations/features", s.listTenantFeatures)
+
 		s.authenticated.POST("/setup/organizations", s.createOrganization)
 		s.authenticated.POST("/auth/provision", s.provisionIdentity)
 		s.authenticated.GET("/setup/status", s.checkSetupStatus)
@@ -1956,6 +1989,56 @@ func (s *Server) lockPayrollRun(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+func (s *Server) createPayrollConfiguration(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !principal.HasPermission("payroll:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage payroll")
+	}
+	var input payroll.CreateConfigurationInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request", err.Error())
+	}
+	result, err := s.payroll.CreateConfiguration(c.Request().Context(), principal.OrganizationID, input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "payroll.config_failed", "Internal server error", "Could not save payroll configuration")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listPayrollRunsForPeriod(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !principal.HasPermission("payroll:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view payroll")
+	}
+	result, err := s.payroll.ListRunsForPeriod(c.Request().Context(), principal.OrganizationID, c.Param("periodId"))
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "payroll.runs_failed", "Internal server error", "Could not load payroll runs")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listPayrollRunItems(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !principal.HasPermission("payroll:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view payroll")
+	}
+	result, err := s.payroll.ListRunItems(c.Request().Context(), principal.OrganizationID, c.Param("runId"))
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "payroll.items_failed", "Internal server error", "Could not load payroll run items")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+
 func (s *Server) createSignatureRequest(c echo.Context) error {
 	principal, ok := identity.PrincipalFromContext(c.Request().Context())
 	if !ok {
@@ -3312,6 +3395,36 @@ func (s *Server) addTenantTicketMessage(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
+func (s *Server) listTenantTicketMessages(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	result, err := s.support.ListTenantTicketMessages(c.Request().Context(), principal.OrganizationID, c.Param("id"))
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "support.messages_failed", "Internal error", "Could not fetch ticket messages")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) updateTenantTicketStatus(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request", err.Error())
+	}
+	if err := s.support.UpdateTenantTicketStatus(c.Request().Context(), principal.OrganizationID, c.Param("id"), body.Status); err != nil {
+		return problem(c, http.StatusInternalServerError, "support.status_failed", "Internal error", "Could not update ticket status")
+	}
+	return c.NoContent(http.StatusOK)
+}
+
+
 // Platform Support
 func (s *Server) listPlatformTickets(c echo.Context) error {
 	_, ok := PlatformPrincipalFromContext(c.Request().Context())
@@ -3520,6 +3633,19 @@ func (s *Server) assignRoleToEmployee(c echo.Context) error {
 	}
 	return c.NoContent(http.StatusOK)
 }
+
+func (s *Server) listPermissions(c echo.Context) error {
+	_, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	result, err := s.identity.ListAllPermissions(c.Request().Context())
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "permissions.list_failed", "Internal error", "Could not fetch permissions")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
 
 // Platform Audit
 func (s *Server) listPlatformAuditLogs(c echo.Context) error {

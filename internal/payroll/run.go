@@ -151,3 +151,88 @@ func (service *Service) LockRun(ctx context.Context, organizationID, actorUserID
 
 	return tx.Commit(ctx)
 }
+
+type RunItem struct {
+	ID           string `json:"id"`
+	PayrollRunID string `json:"payrollRunId"`
+	EmployeeID   string `json:"employeeId"`
+	EmployeeName string `json:"employeeName"`
+	Department   string `json:"department"`
+	AvatarURL    string `json:"avatarUrl"`
+	BasePay      int64  `json:"basePay"`
+	Earnings     int64  `json:"earnings"`
+	Deductions   int64  `json:"deductions"`
+	NetPay       int64  `json:"netPay"`
+}
+
+func (service *Service) ListRunItems(ctx context.Context, organizationID, runID string) ([]RunItem, error) {
+	rows, err := service.pool.Query(ctx, `
+		SELECT 
+			pri.id::text,
+			pri.payroll_run_id::text,
+			pri.employee_id::text,
+			COALESCE(e.first_name || ' ' || e.last_name, 'Employee') AS employee_name,
+			COALESCE(d.name, 'General') AS department,
+			COALESCE(p.avatar_url, '') AS avatar_url,
+			pri.base_pay,
+			pri.earnings,
+			pri.deductions,
+			pri.net_pay
+		FROM payroll_run_items pri
+		JOIN payroll_runs pr ON pr.id = pri.payroll_run_id
+		JOIN payroll_periods pp ON pp.id = pr.payroll_period_id
+		JOIN employees e ON e.id = pri.employee_id
+		LEFT JOIN employee_personal_profiles p ON p.employee_id = e.id
+		LEFT JOIN employment_assignments ea ON ea.employee_id = e.id
+		LEFT JOIN departments d ON d.id = ea.department_id
+		WHERE pr.id = $1 AND pp.organization_id = $2
+		ORDER BY e.first_name ASC
+	`, runID, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]RunItem, 0)
+	for rows.Next() {
+		var item RunItem
+		if err := rows.Scan(
+			&item.ID, &item.PayrollRunID, &item.EmployeeID,
+			&item.EmployeeName, &item.Department, &item.AvatarURL,
+			&item.BasePay, &item.Earnings, &item.Deductions, &item.NetPay,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (service *Service) ListRunsForPeriod(ctx context.Context, organizationID, periodID string) ([]Run, error) {
+	rows, err := service.pool.Query(ctx, `
+		SELECT 
+			pr.id::text, 
+			pr.payroll_period_id::text, 
+			pr.status, 
+			to_char(pr.approved_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		FROM payroll_runs pr
+		JOIN payroll_periods pp ON pp.id = pr.payroll_period_id
+		WHERE pp.id = $1 AND pp.organization_id = $2
+		ORDER BY pr.created_at DESC
+	`, periodID, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]Run, 0)
+	for rows.Next() {
+		var r Run
+		if err := rows.Scan(&r.ID, &r.PayrollPeriodID, &r.Status, &r.ApprovedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, r)
+	}
+	return items, nil
+}
+

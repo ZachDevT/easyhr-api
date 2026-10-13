@@ -20,6 +20,7 @@ type Policy struct {
 	Category          string  `json:"category"`
 	RequiresSignature bool    `json:"requiresSignature"`
 	Status            string  `json:"status"`
+	CreatedAt         string  `json:"createdAt"`
 }
 
 type CreatePolicyInput struct {
@@ -30,16 +31,16 @@ type CreatePolicyInput struct {
 }
 
 func (s *Service) ListPolicies(ctx context.Context, orgID string) ([]Policy, error) {
-	rows, err := s.pool.Query(ctx, "SELECT id::text, document_id::text, title, category, requires_signature, status FROM company_policies WHERE organization_id = $1 ORDER BY created_at DESC", orgID)
+	rows, err := s.pool.Query(ctx, "SELECT id::text, document_id::text, title, category, requires_signature, status, to_char(created_at, 'Mon DD, YYYY') FROM company_policies WHERE organization_id = $1 ORDER BY created_at DESC", orgID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var items []Policy
+	items := make([]Policy, 0)
 	for rows.Next() {
 		var p Policy
-		if err := rows.Scan(&p.ID, &p.DocumentID, &p.Title, &p.Category, &p.RequiresSignature, &p.Status); err != nil {
+		if err := rows.Scan(&p.ID, &p.DocumentID, &p.Title, &p.Category, &p.RequiresSignature, &p.Status, &p.CreatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, p)
@@ -52,9 +53,9 @@ func (s *Service) CreatePolicy(ctx context.Context, orgID, userID string, input 
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO company_policies (organization_id, document_id, title, category, requires_signature, created_by_user_id)
 		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id::text, document_id::text, title, category, requires_signature, status
+		RETURNING id::text, document_id::text, title, category, requires_signature, status, to_char(created_at, 'Mon DD, YYYY')
 	`, orgID, input.DocumentID, input.Title, input.Category, input.RequiresSignature, userID).Scan(
-		&p.ID, &p.DocumentID, &p.Title, &p.Category, &p.RequiresSignature, &p.Status,
+		&p.ID, &p.DocumentID, &p.Title, &p.Category, &p.RequiresSignature, &p.Status, &p.CreatedAt,
 	)
 	return p, err
 }
