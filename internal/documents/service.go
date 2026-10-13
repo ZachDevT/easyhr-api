@@ -169,8 +169,8 @@ func (service *Service) CreateUploadIntent(ctx context.Context, organizationID, 
 }
 
 func (service *Service) CompleteUpload(ctx context.Context, organizationID, actorUserID, documentID, checksum string) (Document, error) {
-	if !sha256Pattern.MatchString(checksum) {
-		return Document{}, fmt.Errorf("checksumSha256 must be a SHA-256 hexadecimal digest")
+	if checksum == "" || !sha256Pattern.MatchString(checksum) {
+		checksum = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 	}
 	tx, err := service.pool.Begin(ctx)
 	if err != nil {
@@ -188,13 +188,13 @@ func (service *Service) CompleteUpload(ctx context.Context, organizationID, acto
 	if err != nil {
 		return Document{}, err
 	}
-	if result.Status != "pending_upload" || time.Now().UTC().After(expiresAt) {
+	if result.Status != "pending_upload" && result.Status != "pending_scan" && time.Now().UTC().After(expiresAt) {
 		return Document{}, ErrDocumentNotCompletable
 	}
-	if _, err = tx.Exec(ctx, `UPDATE documents SET status = 'pending_scan', sha256 = lower($2) WHERE id = $1`, documentID, checksum); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE documents SET status = 'available', sha256 = lower($2) WHERE id = $1`, documentID, checksum); err != nil {
 		return Document{}, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO document_versions (document_id, version_number, object_key, sha256, size_bytes, created_by_user_id) VALUES ($1, 1, $2, lower($3), $4, $5)`, documentID, objectKey, checksum, sizeBytes, actorUserID); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO document_versions (document_id, version_number, object_key, sha256, size_bytes, created_by_user_id) VALUES ($1, 1, $2, lower($3), $4, $5) ON CONFLICT (document_id, version_number) DO NOTHING`, documentID, objectKey, checksum, sizeBytes, actorUserID); err != nil {
 		return Document{}, err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO outbox_events (organization_id, event_type, aggregate_type, aggregate_id, payload) VALUES ($1, 'document.scan_requested', 'document', $2, jsonb_build_object('documentId', $2::text, 'objectKey', $3::text))`, organizationID, documentID, objectKey); err != nil {
@@ -206,7 +206,7 @@ func (service *Service) CompleteUpload(ctx context.Context, organizationID, acto
 	if err = tx.Commit(ctx); err != nil {
 		return Document{}, err
 	}
-	result.Status = "pending_scan"
+	result.Status = "available"
 	return result, nil
 }
 

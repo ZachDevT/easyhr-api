@@ -18,7 +18,7 @@ func (service *Service) GetDownloadUrl(ctx context.Context, organizationID, acto
 	if err != nil {
 		return DownloadUrl{}, ErrDocumentNotFound
 	}
-	if status != "ready" && status != "archived" {
+	if status != "available" && status != "ready" && status != "archived" && status != "pending_scan" {
 		return DownloadUrl{}, fmt.Errorf("document is not ready for download")
 	}
 

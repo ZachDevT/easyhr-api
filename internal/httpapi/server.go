@@ -615,7 +615,7 @@ func (s *Server) completeDocumentUpload(c echo.Context) error {
 	if !ok {
 		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
 	}
-	if !principal.HasPermission("documents:upload") && !principal.HasPermission("documents:manage") {
+	if !principal.HasPermission("documents:upload") && !principal.HasPermission("documents:manage") && !principal.HasPermission("organization:manage") && !principal.HasPermission("employees:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to complete employee document uploads")
 	}
 	var body struct {
@@ -739,8 +739,8 @@ func (s *Server) listLeaveRequests(c echo.Context) error {
 		Status:            c.QueryParam("status"),
 		Cursor:            c.QueryParam("cursor"),
 		Limit:             limit,
-		CanApproveManager: principal.HasPermission("leave:approve_manager") || principal.HasPermission("organization:manage"),
-		CanApproveHR:      principal.HasPermission("leave:approve_hr") || principal.HasPermission("organization:manage"),
+		CanApproveManager: principal.HasPermission("leave:approve_manager") || principal.HasPermission("organization:manage") || principal.HasPermission("employees:manage"),
+		CanApproveHR:      principal.HasPermission("leave:approve_hr") || principal.HasPermission("organization:manage") || principal.HasPermission("employees:manage") || principal.HasPermission("employees:read") || principal.HasPermission("leave:manage_policies"),
 	})
 	if err != nil {
 		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_leave_request_filter", "Invalid leave request filter", err.Error())
@@ -814,8 +814,8 @@ func (s *Server) getLeaveOverview(c echo.Context) error {
 		defer wg.Done()
 		requestsPage, err := s.timeOff.ListRequests(ctx, orgID, userID, timeoff.ListRequestsInput{
 			Limit:             100,
-			CanApproveManager: principal.HasPermission("leave:approve_manager") || principal.HasPermission("organization:manage"),
-			CanApproveHR:      principal.HasPermission("leave:approve_hr") || principal.HasPermission("organization:manage"),
+			CanApproveManager: principal.HasPermission("leave:approve_manager") || principal.HasPermission("organization:manage") || principal.HasPermission("employees:manage"),
+			CanApproveHR:      principal.HasPermission("leave:approve_hr") || principal.HasPermission("organization:manage") || principal.HasPermission("employees:manage") || principal.HasPermission("employees:read") || principal.HasPermission("leave:manage_policies"),
 		})
 		if err == nil && requestsPage.Data != nil {
 			requests = requestsPage.Data

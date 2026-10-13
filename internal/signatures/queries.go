@@ -35,7 +35,7 @@ func (service *Service) ListRequests(ctx context.Context, organizationID string)
 		SELECT 
 			sr.id::text,
 			sr.document_id::text,
-			COALESCE(d.name, 'Document.pdf') as document_name,
+			COALESCE(d.filename, 'Document.pdf') as document_name,
 			sr.status,
 			COALESCE(sr.custom_message, ''),
 			to_char(COALESCE(sr.expires_at, sr.created_at + INTERVAL '30 days'), 'Mon DD, YYYY'),
@@ -114,7 +114,7 @@ func (service *Service) ListMySignatureRequests(ctx context.Context, organizatio
 			r.id::text,
 			sr.id::text,
 			sr.document_id::text,
-			COALESCE(d.name, 'Document.pdf'),
+			COALESCE(d.filename, 'Document.pdf'),
 			COALESCE(u.email, 'People Operations'),
 			r.status,
 			to_char(sr.created_at, 'Mon DD, YYYY'),
@@ -224,15 +224,15 @@ func (service *Service) CreateRequestFromTemplate(ctx context.Context, organizat
 	var docID string
 	err = tx.QueryRow(ctx, `
 		SELECT id::text FROM documents
-		WHERE organization_id = $1 AND name = $2 AND status = 'available'
+		WHERE organization_id = $1 AND filename = $2 AND status <> 'deleted'
 		LIMIT 1
 	`, organizationID, docTitle).Scan(&docID)
 
 	if err != nil {
-		// Create document entry
+		// Create document entry with valid schema columns
 		err = tx.QueryRow(ctx, `
-			INSERT INTO documents (organization_id, name, object_key, content_type, size_bytes, category, status, uploaded_by_user_id)
-			VALUES ($1, $2, 'docs/' || gen_random_uuid() || '.pdf', 'application/pdf', 102400, 'legal', 'available', $3)
+			INSERT INTO documents (organization_id, filename, object_key, content_type, size_bytes, category, status, upload_expires_at, created_by_user_id)
+			VALUES ($1, $2, 'docs/' || gen_random_uuid() || '.pdf', 'application/pdf', 102400, 'contract', 'available', now() + INTERVAL '1 day', $3)
 			RETURNING id::text
 		`, organizationID, docTitle, actorUserID).Scan(&docID)
 		if err != nil {

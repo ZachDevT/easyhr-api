@@ -41,10 +41,15 @@ func (input *CreatePunchInput) Validate() error {
 	if input.OccurredAt == "" {
 		input.OccurredAt = time.Now().UTC().Format(time.RFC3339)
 	}
+	if input.Kind == "in" {
+		input.Kind = "clock_in"
+	} else if input.Kind == "out" {
+		input.Kind = "clock_out"
+	}
 	if input.Kind != "clock_in" && input.Kind != "clock_out" && input.Kind != "break_start" && input.Kind != "break_end" {
 		return fmt.Errorf("kind is invalid (must be clock_in, clock_out, break_start, or break_end)")
 	}
-	if input.Source != "web" && input.Source != "mobile" && input.Source != "kiosk" {
+	if input.Source != "web" && input.Source != "mobile" && input.Source != "kiosk" && input.Source != "manual" {
 		return fmt.Errorf("source is invalid for self-service")
 	}
 	if _, err := time.Parse(time.RFC3339, input.OccurredAt); err != nil {

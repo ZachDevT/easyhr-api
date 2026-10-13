@@ -10,7 +10,10 @@ import (
 
 type createTemplateRequestPayload struct {
 	DocumentTitle string                       `json:"documentTitle"`
+	DocumentName  string                       `json:"documentName"`
 	Message       string                       `json:"message"`
+	CustomMessage string                       `json:"customMessage"`
+	TemplateID    string                       `json:"templateId"`
 	Recipients    []signatures.CreateRecipient `json:"recipients"`
 }
 
@@ -67,11 +70,20 @@ func (s *Server) createSignatureRequestFromTemplate(c echo.Context) error {
 		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request", err.Error())
 	}
 
-	if input.DocumentTitle == "" {
-		input.DocumentTitle = "Employment Document.pdf"
+	docTitle := input.DocumentTitle
+	if docTitle == "" {
+		docTitle = input.DocumentName
+	}
+	if docTitle == "" {
+		docTitle = "Employment Document.pdf"
 	}
 
-	result, err := s.signatures.CreateRequestFromTemplate(c.Request().Context(), principal.OrganizationID, principal.UserID, input.DocumentTitle, input.Message, input.Recipients)
+	msg := input.Message
+	if msg == "" {
+		msg = input.CustomMessage
+	}
+
+	result, err := s.signatures.CreateRequestFromTemplate(c.Request().Context(), principal.OrganizationID, principal.UserID, docTitle, msg, input.Recipients)
 	if err != nil {
 		return problem(c, http.StatusInternalServerError, "signatures.create_failed", "Internal error", err.Error())
 	}

@@ -71,6 +71,27 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		WHERE r.key = 'company_owner' OR r.key LIKE '%admin%' OR r.display_name ILIKE '%admin%' OR r.display_name ILIKE '%owner%'
 		ON CONFLICT DO NOTHING;
 
+		-- Grant leave and attendance management permissions to HR and Manager roles
+		INSERT INTO role_permissions (role_id, permission_key)
+		SELECT r.id, p.key
+		FROM roles r
+		CROSS JOIN (
+			VALUES
+				('leave:approve_hr'),
+				('leave:approve_manager'),
+				('leave:manage_policies'),
+				('leave:request_any'),
+				('attendance:manage_activities'),
+				('attendance:read_team'),
+				('attendance:manage'),
+				('documents:upload'),
+				('documents:read'),
+				('documents:manage')
+		) AS p(key)
+		WHERE r.key ILIKE '%hr%' OR r.key ILIKE '%manager%' OR r.key ILIKE '%lead%' OR r.key ILIKE '%admin%' OR r.key ILIKE '%owner%'
+		   OR r.display_name ILIKE '%hr%' OR r.display_name ILIKE '%manager%' OR r.display_name ILIKE '%lead%' OR r.display_name ILIKE '%admin%' OR r.display_name ILIKE '%owner%'
+		ON CONFLICT DO NOTHING;
+
 		CREATE TABLE IF NOT EXISTS attendance_activities (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -136,6 +157,66 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			active_widgets JSONB NOT NULL DEFAULT '["feed","birthdays"]'::jsonb,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		);
+
+		-- Native e-signature engine: org-managed templates with merge fields
+		INSERT INTO permissions (key, description) VALUES
+			('signatures:manage', 'Create templates and send, void and audit signature requests')
+		ON CONFLICT (key) DO NOTHING;
+
+		INSERT INTO role_permissions (role_id, permission_key)
+		SELECT r.id, 'signatures:manage'
+		FROM roles r
+		WHERE r.key = 'company_owner' OR r.key LIKE '%admin%' OR r.display_name ILIKE '%admin%' OR r.display_name ILIKE '%owner%'
+		ON CONFLICT DO NOTHING;
+
+		CREATE TABLE IF NOT EXISTS signature_templates (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			name TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 200),
+			category TEXT NOT NULL DEFAULT 'General',
+			description TEXT NOT NULL DEFAULT '',
+			body TEXT NOT NULL,
+			requires_countersign BOOLEAN NOT NULL DEFAULT false,
+			expires_in_days INTEGER NOT NULL DEFAULT 14 CHECK (expires_in_days BETWEEN 1 AND 365),
+			is_active BOOLEAN NOT NULL DEFAULT true,
+			created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			UNIQUE (organization_id, name)
+		);
+
+		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS template_id UUID REFERENCES signature_templates(id) ON DELETE SET NULL;
+		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS title TEXT;
+		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS body_rendered TEXT;
+		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS body_sha256 CHAR(64);
+		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS voided_at TIMESTAMPTZ;
+		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS void_reason TEXT;
+		ALTER TABLE signature_requests DROP CONSTRAINT IF EXISTS signature_requests_provider_check;
+		ALTER TABLE signature_requests ADD CONSTRAINT signature_requests_provider_check CHECK (provider IN ('docusign', 'native'));
+
+		ALTER TABLE signature_recipients ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE SET NULL;
+		ALTER TABLE signature_recipients ADD COLUMN IF NOT EXISTS signature_type TEXT;
+		ALTER TABLE signature_recipients ADD COLUMN IF NOT EXISTS signature_data TEXT;
+		ALTER TABLE signature_recipients ADD COLUMN IF NOT EXISTS signer_ip TEXT;
+		ALTER TABLE signature_recipients ADD COLUMN IF NOT EXISTS signer_user_agent TEXT;
+		ALTER TABLE signature_recipients ADD COLUMN IF NOT EXISTS consent_at TIMESTAMPTZ;
+		ALTER TABLE signature_recipients ADD COLUMN IF NOT EXISTS decline_reason TEXT;
+		ALTER TABLE signature_recipients ADD COLUMN IF NOT EXISTS declined_at TIMESTAMPTZ;
+		CREATE INDEX IF NOT EXISTS signature_recipients_employee_idx ON signature_recipients (employee_id);
+		CREATE INDEX IF NOT EXISTS signature_recipients_user_idx ON signature_recipients (user_id);
+
+		CREATE TABLE IF NOT EXISTS signature_events (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			signature_request_id UUID NOT NULL REFERENCES signature_requests(id) ON DELETE CASCADE,
+			recipient_id UUID REFERENCES signature_recipients(id) ON DELETE SET NULL,
+			actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+			event_type TEXT NOT NULL,
+			detail TEXT NOT NULL DEFAULT '',
+			ip_address TEXT,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		);
+		CREATE INDEX IF NOT EXISTS signature_events_request_idx ON signature_events (signature_request_id, created_at);
 	`
 	_, err := pool.Exec(ctx, schemaSQL)
 	return err
