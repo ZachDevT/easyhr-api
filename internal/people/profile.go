@@ -13,6 +13,15 @@ var ErrEmployeeNotFound = errors.New("employee not found")
 type PersonalProfile struct {
 	PersonalEmail              *string `json:"personalEmail"`
 	PersonalPhone              *string `json:"personalPhone"`
+	BirthDate                  *string `json:"birthDate"`
+	Bio                        *string `json:"bio"`
+	AvatarURL                  *string `json:"avatarUrl"`
+	ShirtSize                  *string `json:"shirtSize"`
+	FavoriteFood               *string `json:"favoriteFood"`
+	FavoriteMovies             *string `json:"favoriteMovies"`
+	FavoriteMusic              *string `json:"favoriteMusic"`
+	CoffeeTea                  *string `json:"coffeeTea"`
+	FunFact                    *string `json:"funFact"`
 	AddressLine1               *string `json:"addressLine1"`
 	AddressLine2               *string `json:"addressLine2"`
 	City                       *string `json:"city"`
@@ -52,6 +61,15 @@ type EmployeeProfile struct {
 	UpdatedAt      string  `json:"updatedAt"`
 
 	// Personal profile & onboarding details
+	BirthDate                  *string `json:"birthDate"`
+	Bio                        *string `json:"bio"`
+	AvatarURL                  *string `json:"avatarUrl"`
+	ShirtSize                  *string `json:"shirtSize"`
+	FavoriteFood               *string `json:"favoriteFood"`
+	FavoriteMovies             *string `json:"favoriteMovies"`
+	FavoriteMusic              *string `json:"favoriteMusic"`
+	CoffeeTea                  *string `json:"coffeeTea"`
+	FunFact                    *string `json:"funFact"`
 	AddressLine1               *string `json:"addressLine1"`
 	AddressLine2               *string `json:"addressLine2"`
 	City                       *string `json:"city"`
@@ -87,7 +105,7 @@ const employeeProfileSelectSQL = `
 		COALESCE(NULLIF(TRIM(CONCAT(m.first_name, ' ', m.last_name)), ''), 'No manager assigned') AS manager,
 		assignment.job_title,
 		e.hired_on::text, 
-		COALESCE(u.avatar_url, '') AS avatar,
+		COALESCE(NULLIF(profile.avatar_url, ''), COALESCE(u.avatar_url, '')) AS avatar,
 		e.created_at::text, 
 		e.updated_at::text,
 		profile.address_line_1,
@@ -102,7 +120,16 @@ const employeeProfileSelectSQL = `
 		profile.bank_name,
 		profile.bank_routing_number,
 		profile.bank_account_number,
-		profile.handbook_signed_at::text
+		profile.handbook_signed_at::text,
+		profile.birth_date::text,
+		profile.bio,
+		profile.avatar_url,
+		profile.shirt_size,
+		profile.favorite_food,
+		profile.favorite_movies,
+		profile.favorite_music,
+		profile.coffee_tea,
+		profile.fun_fact
 	FROM employees e
 	LEFT JOIN employee_personal_profiles profile ON profile.employee_id = e.id
 	LEFT JOIN LATERAL (
@@ -155,6 +182,15 @@ func (directory *Directory) scanEmployeeProfile(row pgx.Row) (EmployeeProfile, e
 		&result.BankRoutingNumber,
 		&result.BankAccountNumber,
 		&result.HandbookSignedAt,
+		&result.BirthDate,
+		&result.Bio,
+		&result.AvatarURL,
+		&result.ShirtSize,
+		&result.FavoriteFood,
+		&result.FavoriteMovies,
+		&result.FavoriteMusic,
+		&result.CoffeeTea,
+		&result.FunFact,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return EmployeeProfile{}, ErrEmployeeNotFound
@@ -199,13 +235,18 @@ func (directory *Directory) UpdatePersonalProfile(ctx context.Context, organizat
 			address_line_1, address_line_2, city, administrative_area, postal_code,
 			emergency_contact_name, emergency_contact_relationship, emergency_contact_phone,
 			payment_method, bank_name, bank_routing_number, bank_account_number,
-			handbook_signed_at, updated_at
+			handbook_signed_at,
+			birth_date, bio, avatar_url, shirt_size, favorite_food, favorite_movies, favorite_music, coffee_tea, fun_fact,
+			updated_at
 		) VALUES (
 			$1::uuid, $2, $3,
 			$4, $5, $6, $7, $8,
 			$9, $10, $11,
 			$12, $13, $14, $15,
-			CASE WHEN $16::text IS NOT NULL AND $16::text != '' THEN now() ELSE NULL END, now()
+			CASE WHEN $16::text IS NOT NULL AND $16::text != '' THEN now() ELSE NULL END,
+			CASE WHEN $17::text IS NOT NULL AND $17::text != '' THEN $17::date ELSE NULL END,
+			$18, $19, $20, $21, $22, $23, $24, $25,
+			now()
 		)
 		ON CONFLICT (employee_id) DO UPDATE SET
 			personal_email = COALESCE(EXCLUDED.personal_email, employee_personal_profiles.personal_email),
@@ -223,12 +264,30 @@ func (directory *Directory) UpdatePersonalProfile(ctx context.Context, organizat
 			bank_routing_number = COALESCE(EXCLUDED.bank_routing_number, employee_personal_profiles.bank_routing_number),
 			bank_account_number = COALESCE(EXCLUDED.bank_account_number, employee_personal_profiles.bank_account_number),
 			handbook_signed_at = CASE WHEN EXCLUDED.handbook_signed_at IS NOT NULL THEN now() ELSE employee_personal_profiles.handbook_signed_at END,
+			birth_date = COALESCE(EXCLUDED.birth_date, employee_personal_profiles.birth_date),
+			bio = COALESCE(EXCLUDED.bio, employee_personal_profiles.bio),
+			avatar_url = COALESCE(EXCLUDED.avatar_url, employee_personal_profiles.avatar_url),
+			shirt_size = COALESCE(EXCLUDED.shirt_size, employee_personal_profiles.shirt_size),
+			favorite_food = COALESCE(EXCLUDED.favorite_food, employee_personal_profiles.favorite_food),
+			favorite_movies = COALESCE(EXCLUDED.favorite_movies, employee_personal_profiles.favorite_movies),
+			favorite_music = COALESCE(EXCLUDED.favorite_music, employee_personal_profiles.favorite_music),
+			coffee_tea = COALESCE(EXCLUDED.coffee_tea, employee_personal_profiles.coffee_tea),
+			fun_fact = COALESCE(EXCLUDED.fun_fact, employee_personal_profiles.fun_fact),
 			updated_at = now()
 	`, employeeID, p.PersonalEmail, p.PersonalPhone,
 		p.AddressLine1, p.AddressLine2, p.City, p.AdministrativeArea, p.PostalCode,
 		p.EmergencyContactName, p.EmergencyContactRelationship, p.EmergencyContactPhone,
 		p.PaymentMethod, p.BankName, p.BankRoutingNumber, p.BankAccountNumber,
-		p.HandbookSignedAt)
+		p.HandbookSignedAt,
+		p.BirthDate, p.Bio, p.AvatarURL, p.ShirtSize, p.FavoriteFood, p.FavoriteMovies, p.FavoriteMusic, p.CoffeeTea, p.FunFact)
 
-	return err
+	if err != nil {
+		return err
+	}
+
+	if p.AvatarURL != nil && *p.AvatarURL != "" {
+		_, _ = directory.pool.Exec(ctx, `UPDATE users SET avatar_url = $1 WHERE id = (SELECT user_id FROM employees WHERE id = $2::uuid)`, *p.AvatarURL, employeeID)
+	}
+
+	return nil
 }

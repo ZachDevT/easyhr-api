@@ -202,6 +202,8 @@ func (s *Server) registerRoutes() {
 		s.api.GET("/employees/me", s.getMyEmployeeProfile)
 		s.api.PATCH("/employees/me/profile", s.updateMyPersonalProfile)
 		s.api.POST("/employees/:employeeId/activate", s.activateEmployee)
+		s.api.GET("/onboarding/settings", s.getOnboardingSettings)
+		s.api.PUT("/onboarding/settings", s.updateOnboardingSettings)
 		s.api.POST("/onboarding/send-invitation", s.sendOnboardingInvitation)
 		s.api.POST("/leave/requests", s.submitLeaveRequest)
 		s.api.GET("/leave/requests", s.listLeaveRequests)
@@ -1257,6 +1259,9 @@ func (s *Server) updateMyPersonalProfile(c echo.Context) error {
 		if err := s.people.UpdatePersonalProfile(c.Request().Context(), principal.OrganizationID, empID, input); err != nil {
 			return problem(c, http.StatusInternalServerError, "profile.update_failed", "Failed to update profile", err.Error())
 		}
+		if input.HandbookSignedAt != nil && *input.HandbookSignedAt != "" {
+			_ = s.people.Activate(c.Request().Context(), principal.OrganizationID, empID)
+		}
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{"status": "success"})
@@ -1367,6 +1372,113 @@ func (s *Server) sendOnboardingInvitation(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{"sent": true, "recipient": req.Email})
+}
+
+type OnboardingSettings struct {
+	WelcomeTitle             string `json:"welcomeTitle"`
+	WelcomeMessage           string `json:"welcomeMessage"`
+	WelcomeVideoURL          string `json:"welcomeVideoUrl"`
+	WelcomeVideoRequired     bool   `json:"welcomeVideoRequired"`
+	RequireBioAndAvatar      bool   `json:"requireBioAndAvatar"`
+	RequireCultureFavorites   bool   `json:"requireCultureFavorites"`
+	RequireDirectDeposit     bool   `json:"requireDirectDeposit"`
+	RequireHandbook          bool   `json:"requireHandbook"`
+	HandbookTitle            string `json:"handbookTitle"`
+	HandbookURL              string `json:"handbookUrl"`
+	HandbookContent          string `json:"handbookContent"`
+}
+
+func (s *Server) getOnboardingSettings(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+
+	var cfg OnboardingSettings
+	err := s.pool.QueryRow(c.Request().Context(), `
+		SELECT 
+			welcome_title, welcome_message, COALESCE(welcome_video_url, ''), welcome_video_required,
+			require_bio_and_avatar, require_culture_favorites, require_direct_deposit,
+			require_handbook, handbook_title, COALESCE(handbook_url, ''), COALESCE(handbook_content, '')
+		FROM organization_onboarding_settings
+		WHERE organization_id = $1`, principal.OrganizationID).Scan(
+		&cfg.WelcomeTitle, &cfg.WelcomeMessage, &cfg.WelcomeVideoURL, &cfg.WelcomeVideoRequired,
+		&cfg.RequireBioAndAvatar, &cfg.RequireCultureFavorites, &cfg.RequireDirectDeposit,
+		&cfg.RequireHandbook, &cfg.HandbookTitle, &cfg.HandbookURL, &cfg.HandbookContent,
+	)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		cfg = OnboardingSettings{
+			WelcomeTitle:             "Welcome to the Team",
+			WelcomeMessage:           "We are excited to have you join our team. Let's get your profile set up.",
+			WelcomeVideoURL:          "",
+			WelcomeVideoRequired:     false,
+			RequireBioAndAvatar:      true,
+			RequireCultureFavorites:   true,
+			RequireDirectDeposit:     true,
+			RequireHandbook:          true,
+			HandbookTitle:            "Employee Handbook & Code of Conduct",
+			HandbookURL:              "",
+			HandbookContent:          "Welcome to our organization! As a member of our team, we uphold high standards of integrity, excellence, and mutual respect. Please review and acknowledge our policies.",
+		}
+	} else if err != nil {
+		return problem(c, http.StatusInternalServerError, "onboarding.settings_failed", "Internal server error", err.Error())
+	}
+
+	return c.JSON(http.StatusOK, cfg)
+}
+
+func (s *Server) updateOnboardingSettings(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	if !principal.HasPermission("organization:manage") && !principal.HasPermission("employees:manage") && !principal.HasPermission("onboarding:manage_templates") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to configure onboarding settings")
+	}
+
+	var req OnboardingSettings
+	if err := c.Bind(&req); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request body", err.Error())
+	}
+
+	if req.WelcomeTitle == "" {
+		req.WelcomeTitle = "Welcome to the Team"
+	}
+	if req.HandbookTitle == "" {
+		req.HandbookTitle = "Employee Handbook & Code of Conduct"
+	}
+
+	_, err := s.pool.Exec(c.Request().Context(), `
+		INSERT INTO organization_onboarding_settings (
+			organization_id, welcome_title, welcome_message, welcome_video_url, welcome_video_required,
+			require_bio_and_avatar, require_culture_favorites, require_direct_deposit,
+			require_handbook, handbook_title, handbook_url, handbook_content, updated_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now()
+		)
+		ON CONFLICT (organization_id) DO UPDATE SET
+			welcome_title = EXCLUDED.welcome_title,
+			welcome_message = EXCLUDED.welcome_message,
+			welcome_video_url = EXCLUDED.welcome_video_url,
+			welcome_video_required = EXCLUDED.welcome_video_required,
+			require_bio_and_avatar = EXCLUDED.require_bio_and_avatar,
+			require_culture_favorites = EXCLUDED.require_culture_favorites,
+			require_direct_deposit = EXCLUDED.require_direct_deposit,
+			require_handbook = EXCLUDED.require_handbook,
+			handbook_title = EXCLUDED.handbook_title,
+			handbook_url = EXCLUDED.handbook_url,
+			handbook_content = EXCLUDED.handbook_content,
+			updated_at = now()
+	`, principal.OrganizationID, req.WelcomeTitle, req.WelcomeMessage, req.WelcomeVideoURL, req.WelcomeVideoRequired,
+		req.RequireBioAndAvatar, req.RequireCultureFavorites, req.RequireDirectDeposit,
+		req.RequireHandbook, req.HandbookTitle, req.HandbookURL, req.HandbookContent)
+
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "onboarding.settings_update_failed", "Internal server error", err.Error())
+	}
+
+	return c.JSON(http.StatusOK, req)
 }
 
 func (s *Server) listEmployees(c echo.Context) error {
