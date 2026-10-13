@@ -100,7 +100,26 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 	e.Use(middleware.RequestID())
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins:     allowedOrigins,
+		AllowOriginFunc: func(origin string) (bool, error) {
+			if origin == "" {
+				return false, nil
+			}
+			if origin == "https://easyhr.pro" || strings.HasSuffix(origin, ".easyhr.pro") {
+				return true, nil
+			}
+			if strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "https://localhost:") {
+				return true, nil
+			}
+			if strings.HasSuffix(origin, ".vercel.app") {
+				return true, nil
+			}
+			for _, allowed := range allowedOrigins {
+				if origin == allowed {
+					return true, nil
+				}
+			}
+			return false, nil
+		},
 		AllowMethods:     []string{http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodPut, http.MethodDelete, http.MethodOptions},
 		AllowHeaders:     []string{echo.HeaderAuthorization, echo.HeaderContentType, echo.HeaderXRequestID, "Idempotency-Key", "X-EasyHR-Workspace"},
 		ExposeHeaders:    []string{echo.HeaderXRequestID},

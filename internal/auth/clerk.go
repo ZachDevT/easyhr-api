@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/clerk/clerk-sdk-go/v2"
@@ -34,7 +35,26 @@ func NewClerkMiddleware(config ClerkConfig) (Middleware, error) {
 		return clerkhttp.WithHeaderAuthorization(
 			clerkhttp.JWKSClient(jwksClient),
 			clerkhttp.ProxyURL(config.Issuer),
-			clerkhttp.AuthorizedPartyMatches(config.AuthorizedParties...),
+			clerkhttp.AuthorizedParty(func(party string) bool {
+				if party == "" {
+					return false
+				}
+				if party == "https://easyhr.pro" || strings.HasSuffix(party, ".easyhr.pro") {
+					return true
+				}
+				if strings.HasPrefix(party, "http://localhost:") || strings.HasPrefix(party, "https://localhost:") {
+					return true
+				}
+				if strings.HasSuffix(party, ".vercel.app") {
+					return true
+				}
+				for _, ap := range config.AuthorizedParties {
+					if party == ap {
+						return true
+					}
+				}
+				return false
+			}),
 			clerkhttp.Leeway(5*time.Second),
 			clerkhttp.AuthorizationFailureHandler(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				writeUnauthorized(writer, request, "auth.invalid_token", "The session token could not be verified")
