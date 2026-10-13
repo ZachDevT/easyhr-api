@@ -28,9 +28,10 @@ func NewProvisioner(pool *pgxpool.Pool, clerkSecretKey string) *Provisioner {
 }
 
 type ProvisionInput struct {
-	FirstName string `json:"firstName"`
-	LastName  string `json:"lastName"`
-	Email     string `json:"email"`
+	FirstName       string `json:"firstName"`
+	LastName        string `json:"lastName"`
+	Email           string `json:"email"`
+	InvitationToken string `json:"invitationToken"`
 }
 
 func (provisioner *Provisioner) Provision(ctx context.Context, externalIdentityID string) error {
@@ -96,6 +97,56 @@ func (provisioner *Provisioner) ProvisionWithInput(ctx context.Context, external
 				return ErrIdentityEmailConflict
 			}
 			return fmt.Errorf("upsert local user: %w", err)
+		}
+	}
+
+	// 2. Process invitation token if provided or mark pending invites for this email
+	if existingUserID != "" {
+		if fallback.InvitationToken != "" {
+			var invID, invOrgID string
+			var invEmpID *string
+			errInv := provisioner.pool.QueryRow(ctx, `
+				SELECT id::text, organization_id::text, employee_id::text
+				FROM invitations
+				WHERE token = $1 AND status = 'pending' AND expires_at > now()`,
+				fallback.InvitationToken).Scan(&invID, &invOrgID, &invEmpID)
+			if errInv == nil && invID != "" {
+				_, _ = provisioner.pool.Exec(ctx, `
+					UPDATE invitations SET status = 'accepted', accepted_at = now() WHERE id = $1::uuid`,
+					invID)
+				if invEmpID != nil && *invEmpID != "" {
+					_, _ = provisioner.pool.Exec(ctx, `
+						UPDATE employees SET user_id = $1::uuid WHERE id = $2::uuid AND user_id IS NULL`,
+						existingUserID, *invEmpID)
+				}
+				var membershipID string
+				_ = provisioner.pool.QueryRow(ctx, `
+					INSERT INTO memberships (organization_id, user_id, status)
+					VALUES ($1::uuid, $2::uuid, 'active')
+					ON CONFLICT (organization_id, user_id) DO UPDATE SET status = 'active'
+					RETURNING id::text`,
+					invOrgID, existingUserID).Scan(&membershipID)
+				if membershipID != "" {
+					var roleID string
+					_ = provisioner.pool.QueryRow(ctx, `
+						SELECT id::text FROM roles WHERE organization_id = $1::uuid AND key = 'employee'`,
+						invOrgID).Scan(&roleID)
+					if roleID != "" {
+						_, _ = provisioner.pool.Exec(ctx, `
+							INSERT INTO membership_roles (membership_id, role_id)
+							VALUES ($1::uuid, $2::uuid)
+							ON CONFLICT DO NOTHING`,
+							membershipID, roleID)
+					}
+				}
+			}
+		} else {
+			// Mark any pending invitations for this email as accepted
+			_, _ = provisioner.pool.Exec(ctx, `
+				UPDATE invitations
+				SET status = 'accepted', accepted_at = now()
+				WHERE LOWER(email) = LOWER($1) AND status = 'pending' AND expires_at > now()`,
+				email)
 		}
 	}
 

@@ -3,6 +3,8 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -175,6 +177,8 @@ func (s *Server) registerRoutes() {
 	// Public Routes
 	s.echo.POST("/api/v1/public/contact", s.submitPublicContact)
 	s.echo.GET("/api/v1/public/check-subdomain", s.checkSubdomainAvailability)
+	s.echo.GET("/api/v1/public/invitation", s.getInvitationByToken)
+	s.echo.GET("/api/v1/auth/invitation", s.getInvitationByToken)
 
 	s.registerDocs()
 
@@ -1317,11 +1321,37 @@ func (s *Server) sendOnboardingInvitation(c echo.Context) error {
 		}
 	}
 
+	var token string
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err == nil {
+		token = hex.EncodeToString(tokenBytes)
+		expiresAt := time.Now().Add(7 * 24 * time.Hour)
+		var empIDParam any
+		if req.EmployeeID != "" {
+			empIDParam = req.EmployeeID
+		}
+		_, errIns := s.pool.Exec(c.Request().Context(), `
+			INSERT INTO invitations (organization_id, employee_id, email, name, role, token, status, expires_at)
+			VALUES ($1::uuid, $2, $3, $4, 'employee', $5, 'pending', $6)`,
+			principal.OrganizationID, empIDParam, req.Email, req.Name, token, expiresAt)
+		if errIns != nil {
+			slog.Error("failed to record invitation token", "error", errIns)
+		}
+	}
+
 	if req.PortalURL == "" {
-		if subdomain != "" {
-			req.PortalURL = fmt.Sprintf("https://%s.easyhr.pro/auth/accept-invite?email=%s&name=%s&redirect_url=/my-onboarding", subdomain, url.QueryEscape(req.Email), url.QueryEscape(req.Name))
+		if token != "" {
+			if subdomain != "" {
+				req.PortalURL = fmt.Sprintf("https://%s.easyhr.pro/auth/accept-invite?token=%s&redirect_url=/my-onboarding", subdomain, token)
+			} else {
+				req.PortalURL = fmt.Sprintf("https://easyhr.pro/auth/accept-invite?token=%s&redirect_url=/my-onboarding", token)
+			}
 		} else {
-			req.PortalURL = fmt.Sprintf("https://easyhr.pro/auth/accept-invite?email=%s&name=%s&redirect_url=/my-onboarding", url.QueryEscape(req.Email), url.QueryEscape(req.Name))
+			if subdomain != "" {
+				req.PortalURL = fmt.Sprintf("https://%s.easyhr.pro/auth/accept-invite?email=%s&name=%s&redirect_url=/my-onboarding", subdomain, url.QueryEscape(req.Email), url.QueryEscape(req.Name))
+			} else {
+				req.PortalURL = fmt.Sprintf("https://easyhr.pro/auth/accept-invite?email=%s&name=%s&redirect_url=/my-onboarding", url.QueryEscape(req.Email), url.QueryEscape(req.Name))
+			}
 		}
 	}
 
@@ -2049,9 +2079,37 @@ func (s *Server) updateApplicantStatus(c echo.Context) error {
 				WHERE o.id = $1`, orgID).Scan(&subdomain, &brandColor, &logoURL, &orgName)
 
 			fullName := strings.TrimSpace(applicant.FirstName + " " + applicant.LastName)
-			portalURL := fmt.Sprintf("https://%s.easyhr.pro/auth/accept-invite?email=%s&name=%s&redirect_url=/my-onboarding", subdomain, url.QueryEscape(applicant.Email), url.QueryEscape(fullName))
-			if subdomain == "" {
-				portalURL = fmt.Sprintf("https://easyhr.pro/auth/accept-invite?email=%s&name=%s&redirect_url=/my-onboarding", url.QueryEscape(applicant.Email), url.QueryEscape(fullName))
+
+			var token string
+			tokenBytes := make([]byte, 32)
+			if _, err := rand.Read(tokenBytes); err == nil {
+				token = hex.EncodeToString(tokenBytes)
+				expiresAt := time.Now().Add(7 * 24 * time.Hour)
+				var empIDParam any
+				if empID != "" {
+					empIDParam = empID
+				}
+				_, errIns := s.pool.Exec(context.Background(), `
+					INSERT INTO invitations (organization_id, employee_id, email, name, role, token, status, expires_at)
+					VALUES ($1::uuid, $2, $3, $4, 'employee', $5, 'pending', $6)`,
+					orgID, empIDParam, applicant.Email, fullName, token, expiresAt)
+				if errIns != nil {
+					slog.Error("failed to record invitation token for hired applicant", "error", errIns)
+				}
+			}
+
+			portalURL := ""
+			if token != "" {
+				if subdomain != "" {
+					portalURL = fmt.Sprintf("https://%s.easyhr.pro/auth/accept-invite?token=%s&redirect_url=/my-onboarding", subdomain, token)
+				} else {
+					portalURL = fmt.Sprintf("https://easyhr.pro/auth/accept-invite?token=%s&redirect_url=/my-onboarding", token)
+				}
+			} else {
+				portalURL = fmt.Sprintf("https://%s.easyhr.pro/auth/accept-invite?email=%s&name=%s&redirect_url=/my-onboarding", subdomain, url.QueryEscape(applicant.Email), url.QueryEscape(fullName))
+				if subdomain == "" {
+					portalURL = fmt.Sprintf("https://easyhr.pro/auth/accept-invite?email=%s&name=%s&redirect_url=/my-onboarding", url.QueryEscape(applicant.Email), url.QueryEscape(fullName))
+				}
 			}
 
 			if applicant.Email != "" {
@@ -3570,3 +3628,91 @@ func (s *Server) deleteEmailMacro(c echo.Context) error {
 	}
 	return c.NoContent(http.StatusNoContent)
 }
+
+type InvitationResponse struct {
+	Valid            bool   `json:"valid"`
+	Error            string `json:"error,omitempty"`
+	Email            string `json:"email,omitempty"`
+	Name             string `json:"name,omitempty"`
+	Role             string `json:"role,omitempty"`
+	OrganizationName string `json:"organizationName,omitempty"`
+	Subdomain        string `json:"subdomain,omitempty"`
+	BrandColor       string `json:"brandColor,omitempty"`
+	LogoURL          string `json:"logoUrl,omitempty"`
+}
+
+func (s *Server) getInvitationByToken(c echo.Context) error {
+	token := strings.TrimSpace(c.QueryParam("token"))
+	if token == "" {
+		return c.JSON(http.StatusOK, InvitationResponse{
+			Valid: false,
+			Error: "Invitation token is required.",
+		})
+	}
+
+	var (
+		id, orgID, email, name, role, status string
+		empID                                *string
+		expiresAt                            time.Time
+		orgName, subdomain, brandColor, logoURL string
+	)
+
+	err := s.pool.QueryRow(c.Request().Context(), `
+		SELECT i.id::text, i.organization_id::text, i.employee_id::text, i.email, i.name, i.role, i.status, i.expires_at,
+		       o.name, COALESCE(w.subdomain, ''), COALESCE(w.brand_color, '#A238FF'), COALESCE(w.logo_url, '')
+		FROM invitations i
+		JOIN organizations o ON o.id = i.organization_id
+		LEFT JOIN workspaces w ON w.organization_id = o.id
+		WHERE i.token = $1`, token).Scan(&id, &orgID, &empID, &email, &name, &role, &status, &expiresAt, &orgName, &subdomain, &brandColor, &logoURL)
+
+	if err != nil {
+		return c.JSON(http.StatusOK, InvitationResponse{
+			Valid: false,
+			Error: "This invitation link is invalid or could not be found.",
+		})
+	}
+
+	if status == "accepted" {
+		return c.JSON(http.StatusOK, InvitationResponse{
+			Valid: false,
+			Error: "This invitation has already been accepted. Please sign in to access your portal.",
+		})
+	}
+	if status == "revoked" {
+		return c.JSON(http.StatusOK, InvitationResponse{
+			Valid: false,
+			Error: "This invitation has been revoked. Please contact your company administrator.",
+		})
+	}
+	if time.Now().After(expiresAt) {
+		return c.JSON(http.StatusOK, InvitationResponse{
+			Valid: false,
+			Error: "This invitation link has expired. Please contact your company administrator for a new invitation.",
+		})
+	}
+
+	// Try to get specific job title if employee_id is linked
+	if empID != nil && *empID != "" {
+		var jobTitle string
+		_ = s.pool.QueryRow(c.Request().Context(), `
+			SELECT COALESCE(ea.job_title, '')
+			FROM employment_assignments ea
+			WHERE ea.employee_id = $1::uuid AND ea.effective_to IS NULL
+			LIMIT 1`, *empID).Scan(&jobTitle)
+		if jobTitle != "" {
+			role = jobTitle
+		}
+	}
+
+	return c.JSON(http.StatusOK, InvitationResponse{
+		Valid:            true,
+		Email:            email,
+		Name:             name,
+		Role:             role,
+		OrganizationName: orgName,
+		Subdomain:        subdomain,
+		BrandColor:       brandColor,
+		LogoURL:          logoURL,
+	})
+}
+
