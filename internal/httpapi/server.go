@@ -992,9 +992,6 @@ func (s *Server) createAttendancePunch(c echo.Context) error {
 	if !ok {
 		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
 	}
-	if !principal.HasPermission("attendance:punch_self") && !principal.HasPermission("attendance:manage") && !principal.HasPermission("organization:manage") && !principal.HasPermission("employees:manage") {
-		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to record attendance punches")
-	}
 	var input attendance.CreatePunchInput
 	if err := c.Bind(&input); err != nil {
 		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_json", "Invalid request", "Request body must be valid JSON")
@@ -1232,9 +1229,6 @@ func (s *Server) submitLeaveRequest(c echo.Context) error {
 		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_json", "Invalid request", "Request body must be valid JSON")
 	}
 	if !principal.HasPermission("leave:request_any") {
-		if !principal.HasPermission("leave:request_self") {
-			return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to submit leave requests")
-		}
 		isSelf, err := s.people.IsEmployeeUser(c.Request().Context(), principal.OrganizationID, input.EmployeeID, principal.UserID)
 		if err != nil {
 			return err

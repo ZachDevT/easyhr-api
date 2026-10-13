@@ -39,8 +39,37 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		INSERT INTO permissions (key, description) VALUES
 			('attendance:manage_activities', 'Create and manage attendance punch activities'),
 			('announcements:manage', 'Create and delete company announcements'),
-			('celebrations:wish', 'Send celebration wishes to teammates')
+			('celebrations:wish', 'Send celebration wishes to teammates'),
+			('leave:request_self', 'Submit leave requests for own employee record'),
+			('attendance:punch_self', 'Clock in, clock out and record own breaks'),
+			('attendance:read', 'View own attendance logs and status'),
+			('signatures:read', 'View and sign documents assigned to self')
 		ON CONFLICT (key) DO NOTHING;
+
+		-- Grant essential self-service permissions to all employee roles across organizations
+		INSERT INTO role_permissions (role_id, permission_key)
+		SELECT r.id, p.key
+		FROM roles r
+		CROSS JOIN (
+			VALUES
+				('leave:request_self'),
+				('attendance:punch_self'),
+				('attendance:read'),
+				('celebrations:wish'),
+				('signatures:read'),
+				('organization:read'),
+				('employees:read')
+		) AS p(key)
+		WHERE r.key = 'employee' OR r.display_name ILIKE '%employee%'
+		ON CONFLICT DO NOTHING;
+
+		-- Grant all permissions to owner and admin roles
+		INSERT INTO role_permissions (role_id, permission_key)
+		SELECT r.id, p.key
+		FROM roles r
+		CROSS JOIN permissions p
+		WHERE r.key = 'company_owner' OR r.key LIKE '%admin%' OR r.display_name ILIKE '%admin%' OR r.display_name ILIKE '%owner%'
+		ON CONFLICT DO NOTHING;
 
 		CREATE TABLE IF NOT EXISTS attendance_activities (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
