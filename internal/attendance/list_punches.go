@@ -57,7 +57,7 @@ func (service *Service) ListPunches(ctx context.Context, organizationID string, 
 		cursorAt, cursorID = &cursor.OccurredAt, cursor.ID
 	}
 	rows, err := service.pool.Query(ctx, `
-		SELECT id::text, employee_id::text, kind, occurred_at, source, policy_outcome, created_at
+		SELECT id::text, employee_id::text, kind, occurred_at, source, COALESCE(activity, ''), COALESCE(is_billable, true), policy_outcome, created_at
 		FROM attendance_punches
 		WHERE organization_id = $1 AND employee_id = $2
 		  AND ($3::timestamptz IS NULL OR occurred_at >= $3)
@@ -75,7 +75,7 @@ func (service *Service) ListPunches(ctx context.Context, organizationID string, 
 		var item Punch
 		var occurredAt time.Time
 		var createdAt time.Time
-		if err = rows.Scan(&item.ID, &item.EmployeeID, &item.Kind, &occurredAt, &item.Source, &item.PolicyOutcome, &createdAt); err != nil {
+		if err = rows.Scan(&item.ID, &item.EmployeeID, &item.Kind, &occurredAt, &item.Source, &item.Activity, &item.IsBillable, &item.PolicyOutcome, &createdAt); err != nil {
 			return PunchPage{}, err
 		}
 		item.OccurredAt = occurredAt.UTC().Format(time.RFC3339)

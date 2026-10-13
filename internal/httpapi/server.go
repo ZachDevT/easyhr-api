@@ -25,10 +25,13 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 
+	"github.com/easyhr/easyhr-be/internal/announcements"
 	"github.com/easyhr/easyhr-be/internal/attendance"
 	"github.com/easyhr/easyhr-be/internal/auth"
 	"github.com/easyhr/easyhr-be/internal/benefits"
+	"github.com/easyhr/easyhr-be/internal/celebrations"
 	"github.com/easyhr/easyhr-be/internal/documents"
+	"github.com/easyhr/easyhr-be/internal/notifications"
 	"github.com/easyhr/easyhr-be/internal/email"
 	"github.com/easyhr/easyhr-be/internal/hiring"
 	"github.com/easyhr/easyhr-be/internal/messaging"
@@ -85,6 +88,9 @@ type Server struct {
 	divisions     *tenancy.DivisionService
 	email         *email.Service
 	messaging     *messaging.Service
+	announcements *announcements.Service
+	celebrations  *celebrations.Service
+	notifications *notifications.Service
 }
 
 func New(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.Middleware, clerkSecretKey string) *Server {
@@ -130,7 +136,7 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 	}))
 
 	emailSvc := email.NewService(os.Getenv("RESEND_API_KEY"), os.Getenv("EMAIL_FROM"), os.Getenv("EMAIL_FROM_NAME"))
-	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), storage: documentStorage, setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), operations: operations.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool), email: emailSvc, messaging: messaging.NewService(pool, emailSvc)}
+	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), storage: documentStorage, setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), operations: operations.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool), email: emailSvc, messaging: messaging.NewService(pool, emailSvc), announcements: announcements.NewService(pool), celebrations: celebrations.NewService(pool), notifications: notifications.NewService(pool)}
 	if authentication != nil {
 		s.authenticated = e.Group("/api/v1")
 		s.authenticated.Use(adaptHTTPMiddleware(authentication))
@@ -222,6 +228,19 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/attendance/punches", s.createAttendancePunch)
 		s.api.GET("/attendance/punches", s.listAttendancePunches)
 		s.api.GET("/attendance/live", s.getLiveAttendance)
+		s.api.GET("/attendance/activities", s.listAttendanceActivities)
+		s.api.POST("/attendance/activities", s.createAttendanceActivity)
+		s.api.DELETE("/attendance/activities/:id", s.deleteAttendanceActivity)
+		s.api.GET("/announcements", s.listAnnouncements)
+		s.api.POST("/announcements", s.createAnnouncement)
+		s.api.DELETE("/announcements/:id", s.deleteAnnouncement)
+		s.api.GET("/celebrations", s.listCelebrations)
+		s.api.POST("/celebrations/wishes", s.sendCelebrationWish)
+		s.api.GET("/celebrations/me", s.getMyCelebrationStatus)
+		s.api.GET("/notifications", s.listNotifications)
+		s.api.POST("/notifications/mark-read", s.markNotificationRead)
+		s.api.GET("/user/preferences", s.getUserPreferences)
+		s.api.PUT("/user/preferences", s.updateUserPreferences)
 		s.api.POST("/documents/upload-intents", s.createDocumentUploadIntent)
 		s.api.GET("/documents", s.listDocuments)
 		s.api.POST("/documents/:documentId/complete", s.completeDocumentUpload)
