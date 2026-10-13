@@ -8,6 +8,7 @@ import (
 type PromotionEvent struct {
 	ID                        string  `json:"id"`
 	EmployeeID                string  `json:"employeeId"`
+	EmployeeName              string  `json:"employeeName,omitempty"`
 	EffectiveDate             string  `json:"effectiveDate"`
 	PreviousJobTitle          *string `json:"previousJobTitle"`
 	NewJobTitle               string  `json:"newJobTitle"`
@@ -29,11 +30,13 @@ type ExecutePromotionInput struct {
 
 func (service *Service) ListPromotions(ctx context.Context, organizationID, employeeID string) ([]PromotionEvent, error) {
 	rows, err := service.pool.Query(ctx, `
-		SELECT id::text, employee_id::text, effective_date::text, previous_job_title, new_job_title, 
-		       previous_manager_id::text, new_manager_id::text, previous_compensation_minor, new_compensation_minor, rationale, status 
-		FROM promotion_events 
-		WHERE organization_id = $1 AND employee_id = $2
-		ORDER BY created_at DESC
+		SELECT p.id::text, p.employee_id::text, COALESCE(e.first_name || ' ' || e.last_name, 'Team Member') as employee_name,
+		       p.effective_date::text, p.previous_job_title, p.new_job_title, 
+		       p.previous_manager_id::text, p.new_manager_id::text, p.previous_compensation_minor, p.new_compensation_minor, p.rationale, p.status 
+		FROM promotion_events p
+		LEFT JOIN employees e ON e.id = p.employee_id
+		WHERE p.organization_id = $1 AND ($2 = '' OR p.employee_id::text = $2)
+		ORDER BY p.created_at DESC
 	`, organizationID, employeeID)
 	if err != nil {
 		return nil, err
@@ -43,7 +46,7 @@ func (service *Service) ListPromotions(ctx context.Context, organizationID, empl
 	items := []PromotionEvent{}
 	for rows.Next() {
 		var item PromotionEvent
-		if err := rows.Scan(&item.ID, &item.EmployeeID, &item.EffectiveDate, &item.PreviousJobTitle, &item.NewJobTitle,
+		if err := rows.Scan(&item.ID, &item.EmployeeID, &item.EmployeeName, &item.EffectiveDate, &item.PreviousJobTitle, &item.NewJobTitle,
 			&item.PreviousManagerID, &item.NewManagerID, &item.PreviousCompensationMinor, &item.NewCompensationMinor,
 			&item.Rationale, &item.Status); err != nil {
 			return nil, err
