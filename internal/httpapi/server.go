@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -233,6 +234,7 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/messaging/macros", s.createEmailMacro)
 		s.api.PUT("/messaging/macros/:macroId", s.updateEmailMacro)
 		s.api.DELETE("/messaging/macros/:macroId", s.deleteEmailMacro)
+		s.api.GET("/messaging/inbound", s.listInboundEmails)
 		s.authenticated.POST("/setup/organizations", s.createOrganization)
 		s.authenticated.POST("/auth/provision", s.provisionIdentity)
 		s.authenticated.GET("/setup/status", s.checkSetupStatus)
@@ -242,6 +244,8 @@ func (s *Server) registerRoutes() {
 	s.echo.GET("/api/v1/public/company", s.getPublicCompany)
 	s.echo.POST("/api/v1/public/upload-resume", s.uploadPublicResume)
 	s.echo.POST("/api/v1/messaging/inbound/webhook", s.inboundEmailWebhook)
+	s.echo.POST("/api/inbound", s.inboundEmailWebhook)
+	s.echo.POST("/api/v1/inbound", s.inboundEmailWebhook)
 	s.echo.POST("/api/v1/public/jobs/:postingId/apply", s.applyForJob)
 }
 
@@ -3107,8 +3111,107 @@ func (s *Server) recordCandidateReply(c echo.Context) error {
 	return c.JSON(http.StatusCreated, msg)
 }
 
-// Inbound email webhook for receiving external replies (e.g. from Resend Inbound, SendGrid, Mailgun)
+// Inbound email webhook for receiving external replies from Resend Inbound (email.received event) and manual clients
 func (s *Server) inboundEmailWebhook(c echo.Context) error {
+	rawBytes, err := io.ReadAll(c.Request().Body)
+	if err != nil {
+		return problem(c, http.StatusBadRequest, "inbound.read_body_failed", "Failed to read body", err.Error())
+	}
+
+	// 1. Try parsing as Resend Webhook event (type: "email.received")
+	var resendEvent struct {
+		Type      string `json:"type"`
+		CreatedAt string `json:"created_at"`
+		Data      struct {
+			EmailID   string   `json:"email_id"`
+			CreatedAt string   `json:"created_at"`
+			From      string   `json:"from"`
+			To        []string `json:"to"`
+			Subject   string   `json:"subject"`
+			MessageID string   `json:"message_id"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(rawBytes, &resendEvent); err == nil && resendEvent.Type == "email.received" && resendEvent.Data.EmailID != "" {
+		slog.Info("processing resend inbound email webhook", "email_id", resendEvent.Data.EmailID, "from", resendEvent.Data.From, "subject", resendEvent.Data.Subject)
+
+		// Fetch full email content from Resend Receiving API
+		var details *email.ReceivedEmailDetails
+		if s.email != nil {
+			details, err = s.email.RetrieveReceivedEmail(c.Request().Context(), resendEvent.Data.EmailID)
+			if err != nil {
+				slog.Error("failed to retrieve received email from resend", "email_id", resendEvent.Data.EmailID, "err", err)
+			}
+		}
+
+		senderEmail := resendEvent.Data.From
+		senderName := resendEvent.Data.From
+		subject := resendEvent.Data.Subject
+		recipientEmail := "notifications@recruter.easyhr.pro"
+		if len(resendEvent.Data.To) > 0 {
+			recipientEmail = resendEvent.Data.To[0]
+		}
+		bodyHTML := ""
+		bodyText := ""
+		inReplyTo := ""
+		messageID := resendEvent.Data.MessageID
+
+		if details != nil {
+			if details.From != "" {
+				senderEmail = details.From
+			}
+			if len(details.To) > 0 {
+				recipientEmail = details.To[0]
+			}
+			if details.Subject != "" {
+				subject = details.Subject
+			}
+			bodyHTML = details.HTML
+			bodyText = details.Text
+			if details.MessageID != "" {
+				messageID = details.MessageID
+			}
+			if details.Headers != nil {
+				if fromHeader, ok := details.Headers["from"]; ok && fromHeader != "" {
+					senderName = fromHeader
+				}
+				if irt, ok := details.Headers["in-reply-to"]; ok {
+					inReplyTo = irt
+				} else if ref, ok := details.Headers["references"]; ok {
+					inReplyTo = ref
+				}
+			}
+		}
+
+		msg, procErr := s.messaging.ProcessInboundEmail(c.Request().Context(), messaging.ProcessInboundInput{
+			ResendEmailID:  resendEvent.Data.EmailID,
+			SenderEmail:    senderEmail,
+			SenderName:     senderName,
+			RecipientEmail: recipientEmail,
+			Subject:        subject,
+			BodyHTML:       bodyHTML,
+			BodyText:       bodyText,
+			MessageID:      messageID,
+			InReplyTo:      inReplyTo,
+			RawJSON:        rawBytes,
+		})
+		if procErr != nil {
+			slog.Warn("inbound email saved to inbound_emails but unmatched to active thread", "err", procErr)
+			return c.JSON(http.StatusOK, map[string]interface{}{
+				"success": true,
+				"status":  "received_unmatched",
+				"emailId": resendEvent.Data.EmailID,
+			})
+		}
+
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"success": true,
+			"status":  "matched_thread",
+			"message": msg,
+		})
+	}
+
+	// 2. Direct / manual test payload fallback
 	var input struct {
 		ThreadID    string `json:"threadId"`
 		SenderEmail string `json:"senderEmail"`
@@ -3119,7 +3222,7 @@ func (s *Server) inboundEmailWebhook(c echo.Context) error {
 		Text        string `json:"text"`
 		HTML        string `json:"html"`
 	}
-	if err := c.Bind(&input); err != nil {
+	if err := json.Unmarshal(rawBytes, &input); err != nil {
 		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_json", "Invalid request", "Request body must be valid JSON")
 	}
 
@@ -3151,6 +3254,18 @@ func (s *Server) inboundEmailWebhook(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{"success": true, "message": msg})
+}
+
+func (s *Server) listInboundEmails(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Context missing")
+	}
+	records, err := s.messaging.ListInboundEmails(c.Request().Context(), principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "messaging.list_inbound_failed", "Failed to list inbound emails", err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{"data": records})
 }
 
 func (s *Server) listEmailMacros(c echo.Context) error {

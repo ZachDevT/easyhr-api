@@ -36,11 +36,38 @@ func NewService(apiKey, fromEmail, fromName string) *Service {
 }
 
 type SendEmailPayload struct {
-	From    string   `json:"from"`
-	To      []string `json:"to"`
-	Subject string   `json:"subject"`
-	HTML    string   `json:"html"`
-	ReplyTo string   `json:"reply_to,omitempty"`
+	From    string            `json:"from"`
+	To      []string          `json:"to"`
+	Subject string            `json:"subject"`
+	HTML    string            `json:"html"`
+	ReplyTo string            `json:"reply_to,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+type ReceivedAttachment struct {
+	ID                 string `json:"id"`
+	Filename           string `json:"filename"`
+	ContentType        string `json:"content_type"`
+	ContentDisposition string `json:"content_disposition"`
+	DownloadURL        string `json:"download_url,omitempty"`
+}
+
+type ReceivedEmailDetails struct {
+	ID          string               `json:"id"`
+	Object      string               `json:"object"`
+	To          []string             `json:"to"`
+	From        string               `json:"from"`
+	CreatedAt   string               `json:"created_at"`
+	Subject     string               `json:"subject"`
+	HTML        string               `json:"html"`
+	Text        string               `json:"text"`
+	Headers     map[string]string    `json:"headers"`
+	BCC         []string             `json:"bcc"`
+	CC          []string             `json:"cc"`
+	ReplyTo     []string             `json:"reply_to"`
+	MessageID   string               `json:"message_id"`
+	Attachments []ReceivedAttachment `json:"attachments"`
+	ReceivedFor []string             `json:"received_for"`
 }
 
 type BrandingInfo struct {
@@ -51,13 +78,18 @@ type BrandingInfo struct {
 }
 
 func (s *Service) sendViaResend(ctx context.Context, toEmail, subject, htmlBody string) error {
+	_, err := s.sendViaResendWithHeaders(ctx, toEmail, subject, htmlBody, nil)
+	return err
+}
+
+func (s *Service) sendViaResendWithHeaders(ctx context.Context, toEmail, subject, htmlBody string, headers map[string]string) (string, error) {
 	if strings.TrimSpace(toEmail) == "" {
-		return fmt.Errorf("recipient email is required")
+		return "", fmt.Errorf("recipient email is required")
 	}
 
 	if s.apiKey == "" {
 		log.Printf("[Email Service: DEV MODE] No RESEND_API_KEY specified. Mock-delivered to %s. Subject: %s", toEmail, subject)
-		return nil
+		return fmt.Sprintf("mock-%d", time.Now().UnixNano()), nil
 	}
 
 	sendReq := func(recipient, sub string) (int, string, error) {
@@ -67,6 +99,7 @@ func (s *Service) sendViaResend(ctx context.Context, toEmail, subject, htmlBody 
 			Subject: sub,
 			HTML:    htmlBody,
 			ReplyTo: "notifications@recruter.easyhr.pro",
+			Headers: headers,
 		}
 
 		reqBytes, err := json.Marshal(payload)
@@ -94,7 +127,11 @@ func (s *Service) sendViaResend(ctx context.Context, toEmail, subject, htmlBody 
 	statusCode, respStr, err := sendReq(toEmail, subject)
 	if err == nil && statusCode >= 200 && statusCode < 300 {
 		log.Printf("[Email Success] Email sent successfully via Resend from %s to %s: %s", s.fromEmail, toEmail, respStr)
-		return nil
+		var resendResp struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal([]byte(respStr), &resendResp)
+		return resendResp.ID, nil
 	}
 
 	// Resend sandbox or unverified domain notice
@@ -107,14 +144,57 @@ func (s *Service) sendViaResend(ctx context.Context, toEmail, subject, htmlBody 
 				statusFallback, respFallback, errFallback := sendReq(fallbackEmail, devSubject)
 				if errFallback == nil && statusFallback >= 200 && statusFallback < 300 {
 					log.Printf("[Email Success] Delivered to sandbox account owner <%s> via Resend: %s", fallbackEmail, respFallback)
-					return nil
+					var resendResp struct {
+						ID string `json:"id"`
+					}
+					_ = json.Unmarshal([]byte(respFallback), &resendResp)
+					return resendResp.ID, nil
 				}
 			}
 		}
 	}
 
 	log.Printf("[Email Warning] Resend status %d: %s. Handled gracefully.", statusCode, respStr)
-	return nil
+	return "", nil
+}
+
+// RetrieveReceivedEmail fetches full email body, headers, and metadata from the Resend Receiving API.
+func (s *Service) RetrieveReceivedEmail(ctx context.Context, emailID string) (*ReceivedEmailDetails, error) {
+	if emailID == "" {
+		return nil, fmt.Errorf("email_id is required")
+	}
+	if s.apiKey == "" {
+		return nil, fmt.Errorf("RESEND_API_KEY is not configured")
+	}
+
+	url := fmt.Sprintf("https://api.resend.com/emails/receiving/%s", emailID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("resend retrieve received email error (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var details ReceivedEmailDetails
+	if err := json.Unmarshal(bodyBytes, &details); err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	return &details, nil
 }
 
 // 1. Template: Welcome New Organization Creator (Platform/System Email)
@@ -423,4 +503,9 @@ func (s *Service) SendJobOfferNotification(ctx context.Context, toEmail, candida
 // SendRaw sends an arbitrary HTML email. Implements messaging.EmailSender.
 func (s *Service) SendRaw(ctx context.Context, toEmail, subject, htmlBody string) error {
 	return s.sendViaResend(ctx, toEmail, subject, htmlBody)
+}
+
+// SendRawWithHeaders sends an arbitrary HTML email with custom headers (e.g. In-Reply-To, References) and returns the Resend ID.
+func (s *Service) SendRawWithHeaders(ctx context.Context, toEmail, subject, htmlBody string, headers map[string]string) (string, error) {
+	return s.sendViaResendWithHeaders(ctx, toEmail, subject, htmlBody, headers)
 }

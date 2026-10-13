@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/easyhr/easyhr-be/internal/email"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -51,7 +53,39 @@ type EmailMessage struct {
 	Subject        string    `json:"subject"`
 	BodyHTML       string    `json:"bodyHtml"`
 	ResendID       *string   `json:"resendId,omitempty"`
+	MessageID      *string   `json:"messageId,omitempty"`
+	InReplyTo      *string   `json:"inReplyTo,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
+}
+
+type InboundEmailRecord struct {
+	ID              string     `json:"id"`
+	ResendEmailID   string     `json:"resendEmailId"`
+	SenderEmail     string     `json:"senderEmail"`
+	SenderName      *string    `json:"senderName,omitempty"`
+	RecipientEmail  string     `json:"recipientEmail"`
+	Subject         string     `json:"subject"`
+	MessageID       *string    `json:"messageId,omitempty"`
+	InReplyTo       *string    `json:"inReplyTo,omitempty"`
+	BodyHTML        string     `json:"bodyHtml"`
+	BodyText        string     `json:"bodyText"`
+	Status          string     `json:"status"`
+	MatchedThreadID *string    `json:"matchedThreadId,omitempty"`
+	OrganizationID  *string    `json:"organizationId,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+}
+
+type ProcessInboundInput struct {
+	ResendEmailID  string
+	SenderEmail    string
+	SenderName     string
+	RecipientEmail string
+	Subject        string
+	BodyHTML       string
+	BodyText       string
+	MessageID      string
+	InReplyTo      string
+	RawJSON        []byte
 }
 
 // ─── Input types ──────────────────────────────────────────────────────────────
@@ -85,6 +119,8 @@ type UpdateMacroInput struct {
 
 type EmailSender interface {
 	SendRaw(ctx context.Context, toEmail, subject, htmlBody string) error
+	SendRawWithHeaders(ctx context.Context, toEmail, subject, htmlBody string, headers map[string]string) (string, error)
+	RetrieveReceivedEmail(ctx context.Context, emailID string) (*email.ReceivedEmailDetails, error)
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -138,14 +174,19 @@ func (s *Service) CreateThread(ctx context.Context, orgID, applicantID, senderUs
 	// Fire email asynchronously
 	if s.mailer != nil {
 		go func() {
-			_ = s.mailer.SendRaw(context.Background(), input.CandidateEmail, input.Subject, input.BodyHTML)
+			resendID, err := s.mailer.SendRawWithHeaders(context.Background(), input.CandidateEmail, input.Subject, input.BodyHTML, nil)
+			if err == nil && resendID != "" {
+				_, _ = s.pool.Exec(context.Background(), `
+					UPDATE candidate_email_messages SET resend_id = $1 WHERE thread_id = $2
+				`, resendID, thread.ID)
+			}
 		}()
 	}
 
 	return thread, nil
 }
 
-// ReplyToThread appends a recruiter reply to an existing thread and re-sends to candidate.
+// ReplyToThread appends a recruiter reply to an existing thread and re-sends to candidate with In-Reply-To headers.
 func (s *Service) ReplyToThread(ctx context.Context, orgID, threadID, senderUserID, senderName, senderEmail, bodyHTML string) (EmailMessage, error) {
 	var thread EmailThread
 	err := s.pool.QueryRow(ctx, `
@@ -160,6 +201,28 @@ func (s *Service) ReplyToThread(ctx context.Context, orgID, threadID, senderUser
 		return EmailMessage{}, fmt.Errorf("load thread: %w", err)
 	}
 
+	// Look up the last candidate message or last message in this thread for threading headers
+	var inReplyToHeader string
+	var lastMsgID, lastResendID *string
+	_ = s.pool.QueryRow(ctx, `
+		SELECT message_id, resend_id
+		FROM candidate_email_messages
+		WHERE thread_id = $1 AND sender_type = 'candidate'
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, threadID).Scan(&lastMsgID, &lastResendID)
+
+	if lastMsgID != nil && *lastMsgID != "" {
+		inReplyToHeader = *lastMsgID
+	} else if lastResendID != nil && *lastResendID != "" {
+		inReplyToHeader = fmt.Sprintf("<%s@recruter.easyhr.pro>", *lastResendID)
+	}
+
+	replySubject := thread.Subject
+	if !strings.HasPrefix(strings.ToLower(replySubject), "re:") {
+		replySubject = "Re: " + replySubject
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return EmailMessage{}, fmt.Errorf("begin tx: %w", err)
@@ -169,12 +232,12 @@ func (s *Service) ReplyToThread(ctx context.Context, orgID, threadID, senderUser
 	var msg EmailMessage
 	err = tx.QueryRow(ctx, `
 		INSERT INTO candidate_email_messages
-			(thread_id, organization_id, sender_type, sender_name, sender_email, recipient_email, subject, body_html)
-		VALUES ($1, $2, 'recruiter', $3, $4, $5, $6, $7)
-		RETURNING id::text, thread_id::text, organization_id::text, sender_type, sender_name, sender_email, recipient_email, subject, body_html, created_at
-	`, threadID, orgID, senderName, senderEmail, thread.CandidateEmail, thread.Subject, bodyHTML).
+			(thread_id, organization_id, sender_type, sender_name, sender_email, recipient_email, subject, body_html, in_reply_to)
+		VALUES ($1, $2, 'recruiter', $3, $4, $5, $6, $7, $8)
+		RETURNING id::text, thread_id::text, organization_id::text, sender_type, sender_name, sender_email, recipient_email, subject, body_html, resend_id, message_id, in_reply_to, created_at
+	`, threadID, orgID, senderName, senderEmail, thread.CandidateEmail, replySubject, bodyHTML, inReplyToHeader).
 		Scan(&msg.ID, &msg.ThreadID, &msg.OrganizationID, &msg.SenderType, &msg.SenderName,
-			&msg.SenderEmail, &msg.RecipientEmail, &msg.Subject, &msg.BodyHTML, &msg.CreatedAt)
+			&msg.SenderEmail, &msg.RecipientEmail, &msg.Subject, &msg.BodyHTML, &msg.ResendID, &msg.MessageID, &msg.InReplyTo, &msg.CreatedAt)
 	if err != nil {
 		return EmailMessage{}, fmt.Errorf("insert message: %w", err)
 	}
@@ -190,9 +253,20 @@ func (s *Service) ReplyToThread(ctx context.Context, orgID, threadID, senderUser
 		return EmailMessage{}, fmt.Errorf("commit tx: %w", err)
 	}
 
+	headers := make(map[string]string)
+	if inReplyToHeader != "" {
+		headers["In-Reply-To"] = inReplyToHeader
+		headers["References"] = inReplyToHeader
+	}
+
 	if s.mailer != nil {
 		go func() {
-			_ = s.mailer.SendRaw(context.Background(), thread.CandidateEmail, thread.Subject, bodyHTML)
+			resendID, err := s.mailer.SendRawWithHeaders(context.Background(), thread.CandidateEmail, replySubject, bodyHTML, headers)
+			if err == nil && resendID != "" {
+				_, _ = s.pool.Exec(context.Background(), `
+					UPDATE candidate_email_messages SET resend_id = $1 WHERE id = $2
+				`, resendID, msg.ID)
+			}
 		}()
 	}
 
@@ -229,10 +303,10 @@ func (s *Service) RecordCandidateReply(ctx context.Context, orgID, threadID, sen
 		INSERT INTO candidate_email_messages
 			(thread_id, organization_id, sender_type, sender_name, sender_email, recipient_email, subject, body_html)
 		VALUES ($1, $2, 'candidate', $3, $4, $5, $6, $7)
-		RETURNING id::text, thread_id::text, organization_id::text, sender_type, sender_name, sender_email, recipient_email, subject, body_html, created_at
+		RETURNING id::text, thread_id::text, organization_id::text, sender_type, sender_name, sender_email, recipient_email, subject, body_html, resend_id, message_id, in_reply_to, created_at
 	`, threadID, orgID, senderName, thread.CandidateEmail, "notifications@recruter.easyhr.pro", thread.Subject, bodyHTML).
 		Scan(&msg.ID, &msg.ThreadID, &msg.OrganizationID, &msg.SenderType, &msg.SenderName,
-			&msg.SenderEmail, &msg.RecipientEmail, &msg.Subject, &msg.BodyHTML, &msg.CreatedAt)
+			&msg.SenderEmail, &msg.RecipientEmail, &msg.Subject, &msg.BodyHTML, &msg.ResendID, &msg.MessageID, &msg.InReplyTo, &msg.CreatedAt)
 	if err != nil {
 		return EmailMessage{}, fmt.Errorf("insert candidate message: %w", err)
 	}
@@ -251,41 +325,110 @@ func (s *Service) RecordCandidateReply(ctx context.Context, orgID, threadID, sen
 	return msg, nil
 }
 
-// InboundWebhookMessage finds a thread (by ID or candidate email) and appends the incoming email.
-func (s *Service) InboundWebhookMessage(ctx context.Context, threadID, senderEmail, senderName, subject, bodyHTML string) (EmailMessage, error) {
-	var thread EmailThread
-	var err error
+// ProcessInboundEmail processes an inbound email event from Resend, parses headers, matches thread or applicant, records to inbound_emails, and appends to candidate thread.
+func (s *Service) ProcessInboundEmail(ctx context.Context, input ProcessInboundInput) (EmailMessage, error) {
+	senderEmail := strings.TrimSpace(input.SenderEmail)
+	senderName := strings.TrimSpace(input.SenderName)
+	if senderName == "" {
+		senderName = senderEmail
+	}
+	bodyHTML := input.BodyHTML
+	if strings.TrimSpace(bodyHTML) == "" {
+		if strings.TrimSpace(input.BodyText) != "" {
+			bodyHTML = fmt.Sprintf("<p>%s</p>", strings.ReplaceAll(input.BodyText, "\n", "<br/>"))
+		} else {
+			bodyHTML = "<p>No content</p>"
+		}
+	}
 
-	if threadID != "" {
-		err = s.pool.QueryRow(ctx, `
-			SELECT id::text, organization_id::text, subject, candidate_email, candidate_name, status
-			FROM candidate_email_threads
-			WHERE id = $1
-		`, threadID).Scan(&thread.ID, &thread.OrganizationID, &thread.Subject, &thread.CandidateEmail, &thread.CandidateName, &thread.Status)
-	} else if senderEmail != "" {
-		err = s.pool.QueryRow(ctx, `
-			SELECT id::text, organization_id::text, subject, candidate_email, candidate_name, status
+	var thread EmailThread
+	var matchedOrgID string
+	matched := false
+
+	// Strategy 1: Match by In-Reply-To header
+	if input.InReplyTo != "" {
+		cleanInReplyTo := strings.Trim(input.InReplyTo, "<>")
+		err := s.pool.QueryRow(ctx, `
+			SELECT t.id::text, t.organization_id::text, t.applicant_id::text, t.subject, t.candidate_email, t.candidate_name, t.status
+			FROM candidate_email_messages m
+			JOIN candidate_email_threads t ON t.id = m.thread_id
+			WHERE m.message_id = $1 OR m.resend_id = $1 OR m.message_id = $2 OR m.resend_id = $2
+			LIMIT 1
+		`, input.InReplyTo, cleanInReplyTo).Scan(&thread.ID, &thread.OrganizationID, &thread.ApplicantID, &thread.Subject, &thread.CandidateEmail, &thread.CandidateName, &thread.Status)
+		if err == nil && thread.ID != "" {
+			matched = true
+			matchedOrgID = thread.OrganizationID
+		}
+	}
+
+	// Strategy 2: Match by existing candidate email in threads
+	if !matched && senderEmail != "" {
+		err := s.pool.QueryRow(ctx, `
+			SELECT id::text, organization_id::text, applicant_id::text, subject, candidate_email, candidate_name, status
 			FROM candidate_email_threads
 			WHERE LOWER(candidate_email) = LOWER($1)
 			ORDER BY last_message_at DESC
 			LIMIT 1
-		`, senderEmail).Scan(&thread.ID, &thread.OrganizationID, &thread.Subject, &thread.CandidateEmail, &thread.CandidateName, &thread.Status)
-	} else {
-		return EmailMessage{}, errors.New("either threadId or senderEmail is required")
+		`, senderEmail).Scan(&thread.ID, &thread.OrganizationID, &thread.ApplicantID, &thread.Subject, &thread.CandidateEmail, &thread.CandidateName, &thread.Status)
+		if err == nil && thread.ID != "" {
+			matched = true
+			matchedOrgID = thread.OrganizationID
+		}
 	}
 
-	if errors.Is(err, pgx.ErrNoRows) {
-		return EmailMessage{}, ErrNotFound
-	}
-	if err != nil {
-		return EmailMessage{}, fmt.Errorf("find thread for webhook: %w", err)
+	// Strategy 3: Match against job_applicants table
+	if !matched && senderEmail != "" {
+		var appID, orgID, appName, appEmail string
+		err := s.pool.QueryRow(ctx, `
+			SELECT id::text, organization_id::text, full_name, email
+			FROM job_applicants
+			WHERE LOWER(email) = LOWER($1)
+			ORDER BY created_at DESC
+			LIMIT 1
+		`, senderEmail).Scan(&appID, &orgID, &appName, &appEmail)
+		if err == nil && appID != "" {
+			sub := input.Subject
+			if sub == "" {
+				sub = "Conversation with " + appName
+			}
+			err = s.pool.QueryRow(ctx, `
+				INSERT INTO candidate_email_threads
+					(organization_id, applicant_id, subject, candidate_email, candidate_name, status, last_message_at)
+				VALUES ($1, $2, $3, $4, $5, 'open', NOW())
+				RETURNING id::text, organization_id::text, applicant_id::text, subject, candidate_email, candidate_name, status, last_message_at, created_at
+			`, orgID, appID, sub, appEmail, appName).
+				Scan(&thread.ID, &thread.OrganizationID, &thread.ApplicantID, &thread.Subject,
+					&thread.CandidateEmail, &thread.CandidateName, &thread.Status, &thread.LastMessageAt, &thread.CreatedAt)
+			if err == nil {
+				matched = true
+				matchedOrgID = orgID
+			}
+		}
 	}
 
-	if senderName == "" {
-		senderName = thread.CandidateName
+	// Record in inbound_emails table
+	status := "unmatched"
+	var threadIDPtr *string
+	var orgIDPtr *string
+	if matched {
+		status = "matched_thread"
+		threadIDPtr = &thread.ID
+		orgIDPtr = &matchedOrgID
 	}
-	if senderEmail == "" {
-		senderEmail = thread.CandidateEmail
+
+	rawJSON := input.RawJSON
+	if len(rawJSON) == 0 {
+		rawJSON = []byte("{}")
+	}
+
+	_, _ = s.pool.Exec(ctx, `
+		INSERT INTO inbound_emails
+			(resend_email_id, sender_email, sender_name, recipient_email, subject, message_id, in_reply_to, body_html, body_text, raw_payload, status, matched_thread_id, organization_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+	`, input.ResendEmailID, senderEmail, senderName, input.RecipientEmail, input.Subject, input.MessageID, input.InReplyTo, bodyHTML, input.BodyText, rawJSON, status, threadIDPtr, orgIDPtr)
+
+	if !matched {
+		return EmailMessage{}, fmt.Errorf("%w: no matching thread or candidate for sender %s", ErrNotFound, senderEmail)
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -297,14 +440,14 @@ func (s *Service) InboundWebhookMessage(ctx context.Context, threadID, senderEma
 	var msg EmailMessage
 	err = tx.QueryRow(ctx, `
 		INSERT INTO candidate_email_messages
-			(thread_id, organization_id, sender_type, sender_name, sender_email, recipient_email, subject, body_html)
-		VALUES ($1, $2, 'candidate', $3, $4, $5, $6, $7)
-		RETURNING id::text, thread_id::text, organization_id::text, sender_type, sender_name, sender_email, recipient_email, subject, body_html, created_at
-	`, thread.ID, thread.OrganizationID, senderName, senderEmail, "recruiting@easyhr.app", subject, bodyHTML).
+			(thread_id, organization_id, sender_type, sender_name, sender_email, recipient_email, subject, body_html, resend_id, message_id, in_reply_to, raw_json)
+		VALUES ($1, $2, 'candidate', $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		RETURNING id::text, thread_id::text, organization_id::text, sender_type, sender_name, sender_email, recipient_email, subject, body_html, resend_id, message_id, in_reply_to, created_at
+	`, thread.ID, matchedOrgID, senderName, senderEmail, input.RecipientEmail, input.Subject, bodyHTML, input.ResendEmailID, input.MessageID, input.InReplyTo, rawJSON).
 		Scan(&msg.ID, &msg.ThreadID, &msg.OrganizationID, &msg.SenderType, &msg.SenderName,
-			&msg.SenderEmail, &msg.RecipientEmail, &msg.Subject, &msg.BodyHTML, &msg.CreatedAt)
+			&msg.SenderEmail, &msg.RecipientEmail, &msg.Subject, &msg.BodyHTML, &msg.ResendID, &msg.MessageID, &msg.InReplyTo, &msg.CreatedAt)
 	if err != nil {
-		return EmailMessage{}, fmt.Errorf("insert webhook message: %w", err)
+		return EmailMessage{}, fmt.Errorf("insert candidate inbound message: %w", err)
 	}
 
 	_, err = tx.Exec(ctx, `
@@ -319,6 +462,60 @@ func (s *Service) InboundWebhookMessage(ctx context.Context, threadID, senderEma
 	}
 
 	return msg, nil
+}
+
+// InboundWebhookMessage backwards compatibility wrapper for manual inbound requests.
+func (s *Service) InboundWebhookMessage(ctx context.Context, threadID, senderEmail, senderName, subject, bodyHTML string) (EmailMessage, error) {
+	if threadID != "" {
+		var orgID string
+		err := s.pool.QueryRow(ctx, `SELECT organization_id::text FROM candidate_email_threads WHERE id = $1`, threadID).Scan(&orgID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return EmailMessage{}, ErrNotFound
+		}
+		if err != nil {
+			return EmailMessage{}, err
+		}
+		return s.RecordCandidateReply(ctx, orgID, threadID, senderName, bodyHTML)
+	}
+	return s.ProcessInboundEmail(ctx, ProcessInboundInput{
+		ResendEmailID:  fmt.Sprintf("manual-%d", time.Now().UnixNano()),
+		SenderEmail:    senderEmail,
+		SenderName:     senderName,
+		RecipientEmail: "notifications@recruter.easyhr.pro",
+		Subject:        subject,
+		BodyHTML:       bodyHTML,
+	})
+}
+
+// ListInboundEmails returns raw received inbound emails for an organization.
+func (s *Service) ListInboundEmails(ctx context.Context, orgID string) ([]InboundEmailRecord, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id::text, resend_email_id, sender_email, sender_name, recipient_email, subject,
+		       message_id, in_reply_to, body_html, body_text, status, matched_thread_id::text, organization_id::text, created_at
+		FROM inbound_emails
+		WHERE organization_id = $1 OR organization_id IS NULL
+		ORDER BY created_at DESC
+		LIMIT 100
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("query inbound emails: %w", err)
+	}
+	defer rows.Close()
+
+	var records []InboundEmailRecord
+	for rows.Next() {
+		var r InboundEmailRecord
+		if err := rows.Scan(&r.ID, &r.ResendEmailID, &r.SenderEmail, &r.SenderName, &r.RecipientEmail,
+			&r.Subject, &r.MessageID, &r.InReplyTo, &r.BodyHTML, &r.BodyText, &r.Status,
+			&r.MatchedThreadID, &r.OrganizationID, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan inbound email: %w", err)
+		}
+		records = append(records, r)
+	}
+	if records == nil {
+		records = []InboundEmailRecord{}
+	}
+	return records, nil
 }
 
 // ListThreads lists email threads for an org, optionally filtered by applicant.
@@ -371,7 +568,7 @@ func (s *Service) GetThreadMessages(ctx context.Context, orgID, threadID string)
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT id::text, thread_id::text, organization_id::text, sender_type, sender_name, sender_email, recipient_email, subject, body_html, resend_id, created_at
+		SELECT id::text, thread_id::text, organization_id::text, sender_type, sender_name, sender_email, recipient_email, subject, body_html, resend_id, message_id, in_reply_to, created_at
 		FROM candidate_email_messages
 		WHERE thread_id = $1
 		ORDER BY created_at ASC
@@ -385,7 +582,7 @@ func (s *Service) GetThreadMessages(ctx context.Context, orgID, threadID string)
 	for rows.Next() {
 		var m EmailMessage
 		if err := rows.Scan(&m.ID, &m.ThreadID, &m.OrganizationID, &m.SenderType, &m.SenderName,
-			&m.SenderEmail, &m.RecipientEmail, &m.Subject, &m.BodyHTML, &m.ResendID, &m.CreatedAt); err != nil {
+			&m.SenderEmail, &m.RecipientEmail, &m.Subject, &m.BodyHTML, &m.ResendID, &m.MessageID, &m.InReplyTo, &m.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		msgs = append(msgs, m)
