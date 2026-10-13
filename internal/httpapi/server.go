@@ -241,6 +241,11 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/notifications/mark-read", s.markNotificationRead)
 		s.api.GET("/user/preferences", s.getUserPreferences)
 		s.api.PUT("/user/preferences", s.updateUserPreferences)
+		s.api.GET("/signatures", s.listSignatureRequests)
+		s.api.POST("/signatures", s.createSignatureRequestFromTemplate)
+		s.api.GET("/signatures/me", s.listMySignatureRequests)
+		s.api.POST("/signatures/:id/sign", s.signSignatureRequest)
+		s.api.POST("/signatures/:id/decline", s.declineSignatureRequest)
 		s.api.POST("/documents/upload-intents", s.createDocumentUploadIntent)
 		s.api.GET("/documents", s.listDocuments)
 		s.api.POST("/documents/:documentId/complete", s.completeDocumentUpload)
@@ -2815,6 +2820,10 @@ func (s *Server) listBenefitPlans(c echo.Context) error {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
+	if !principal.HasPermission("benefits:manage") && !principal.HasPermission("benefits:read") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have administrative permission to access benefit plans")
+	}
+
 	result, err := s.benefits.ListPlans(c.Request().Context(), principal.OrganizationID)
 	if err != nil {
 		return problem(c, http.StatusInternalServerError, "benefits.list_plans_failed", "Internal error", "Could not fetch plans")
@@ -2828,7 +2837,7 @@ func (s *Server) createBenefitPlan(c echo.Context) error {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
-	if !principal.HasPermission("benefits:manage") {
+	if !principal.HasPermission("benefits:manage") && !principal.HasPermission("organization:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
 	}
 	var input benefits.CreatePlanInput
@@ -2848,6 +2857,10 @@ func (s *Server) listAllBenefitEnrollments(c echo.Context) error {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
+	if !principal.HasPermission("benefits:manage") && !principal.HasPermission("benefits:read") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have administrative permission to access all employee enrollments")
+	}
+
 	result, err := s.benefits.ListAllEnrollments(c.Request().Context(), principal.OrganizationID)
 	if err != nil {
 		return problem(c, http.StatusInternalServerError, "benefits.list_enrollments_failed", "Internal error", "Could not fetch enrollments")
@@ -2861,7 +2874,13 @@ func (s *Server) listBenefitEnrollments(c echo.Context) error {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
-	result, err := s.benefits.ListEnrollments(c.Request().Context(), principal.OrganizationID, c.Param("employeeId"))
+	targetEmployeeID := c.Param("employeeId")
+	isSelf, _ := s.people.IsEmployeeUser(c.Request().Context(), principal.OrganizationID, targetEmployeeID, principal.UserID)
+	if !isSelf && !principal.HasPermission("benefits:manage") && !principal.HasPermission("benefits:read") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You can only view your own benefit enrollments")
+	}
+
+	result, err := s.benefits.ListEnrollments(c.Request().Context(), principal.OrganizationID, targetEmployeeID)
 	if err != nil {
 		return problem(c, http.StatusInternalServerError, "benefits.list_enrollments_failed", "Internal error", "Could not fetch enrollments")
 	}

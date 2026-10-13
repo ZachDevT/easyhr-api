@@ -252,6 +252,27 @@ func (s *Service) SendWish(ctx context.Context, orgID, senderUserID string, inpu
 		input.Reaction = "heart"
 	}
 
+	// Verify that today is actually the celebration day for the recipient
+	now := time.Now().UTC()
+	var birthDate, hiredOn *time.Time
+	_ = s.pool.QueryRow(ctx, `
+		SELECT p.birth_date, e.hired_on
+		FROM employees e
+		LEFT JOIN employee_personal_profiles p ON p.employee_id = e.id
+		WHERE e.id = $1 AND e.organization_id = $2
+	`, input.RecipientEmployeeID, orgID).Scan(&birthDate, &hiredOn)
+
+	isToday := false
+	if input.CelebrationType == "birthday" && birthDate != nil {
+		isToday = (birthDate.Month() == now.Month() && birthDate.Day() == now.Day())
+	} else if input.CelebrationType == "anniversary" && hiredOn != nil {
+		isToday = (hiredOn.Month() == now.Month() && hiredOn.Day() == now.Day())
+	}
+
+	if !isToday {
+		return Wish{}, fmt.Errorf("wishes can only be sent on the celebration day itself")
+	}
+
 	// Sender info
 	var senderEmpID *string
 	var senderName, senderAvatar string
