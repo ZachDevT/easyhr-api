@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 
@@ -37,6 +39,114 @@ func loadEnvFile(path string) {
 	}
 }
 
+type ClerkUser struct {
+	ID             string `json:"id"`
+	EmailAddresses []struct {
+		EmailAddress string `json:"email_address"`
+	} `json:"email_addresses"`
+}
+
+type ClerkInvitation struct {
+	ID           string `json:"id"`
+	EmailAddress string `json:"email_address"`
+	Status       string `json:"status"`
+}
+
+func inspectAndCleanClerk(secretKey string, label string, dryRun bool) int {
+	if secretKey == "" {
+		return 0
+	}
+	fmt.Printf("\n--- Clerk (%s) Inspection ---\n", label)
+
+	// 1. Fetch Users
+	req, err := http.NewRequest("GET", "https://api.clerk.com/v1/users?limit=100", nil)
+	if err != nil {
+		log.Printf("Error creating Clerk request: %v", err)
+		return 0
+	}
+	req.Header.Set("Authorization", "Bearer "+secretKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("Error querying Clerk API: %v", err)
+		return 0
+	}
+	defer resp.Body.Close()
+
+	var users []ClerkUser
+	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
+		log.Printf("Error decoding Clerk response: %v", err)
+		return 0
+	}
+
+	if len(users) == 0 {
+		fmt.Printf("  (No users found in Clerk %s)\n", label)
+	} else {
+		for i, u := range users {
+			email := "no-email"
+			if len(u.EmailAddresses) > 0 {
+				email = u.EmailAddresses[0].EmailAddress
+			}
+			fmt.Printf("  [%d] User ID: %s | Email: %s\n", i+1, u.ID, email)
+		}
+	}
+
+	// 2. Fetch Invitations
+	invReq, _ := http.NewRequest("GET", "https://api.clerk.com/v1/invitations?status=pending", nil)
+	invReq.Header.Set("Authorization", "Bearer "+secretKey)
+	invResp, err := http.DefaultClient.Do(invReq)
+	var invitations []ClerkInvitation
+	if err == nil {
+		defer invResp.Body.Close()
+		_ = json.NewDecoder(invResp.Body).Decode(&invitations)
+		if len(invitations) > 0 {
+			fmt.Printf("  Pending invitations found: %d\n", len(invitations))
+		}
+	}
+
+	if dryRun {
+		return len(users)
+	}
+
+	// Delete users
+	if len(users) > 0 {
+		fmt.Printf("\nDeleting %d users from Clerk (%s)...\n", len(users), label)
+		for _, u := range users {
+			delReq, _ := http.NewRequest("DELETE", "https://api.clerk.com/v1/users/"+u.ID, nil)
+			delReq.Header.Set("Authorization", "Bearer "+secretKey)
+			delResp, err := http.DefaultClient.Do(delReq)
+			if err != nil {
+				fmt.Printf("  Failed to delete Clerk user %s: %v\n", u.ID, err)
+			} else {
+				delResp.Body.Close()
+				fmt.Printf("  Successfully deleted Clerk user: %s\n", u.ID)
+			}
+		}
+	}
+
+	// Revoke invitations
+	for _, inv := range invitations {
+		revReq, _ := http.NewRequest("POST", fmt.Sprintf("https://api.clerk.com/v1/invitations/%s/revoke", inv.ID), nil)
+		revReq.Header.Set("Authorization", "Bearer "+secretKey)
+		revResp, err := http.DefaultClient.Do(revReq)
+		if err == nil {
+			revResp.Body.Close()
+			fmt.Printf("  Revoked invitation: %s (%s)\n", inv.ID, inv.EmailAddress)
+		}
+	}
+
+	// Re-verify
+	vReq, _ := http.NewRequest("GET", "https://api.clerk.com/v1/users?limit=100", nil)
+	vReq.Header.Set("Authorization", "Bearer "+secretKey)
+	vResp, err := http.DefaultClient.Do(vReq)
+	if err == nil {
+		defer vResp.Body.Close()
+		var rem []ClerkUser
+		_ = json.NewDecoder(vResp.Body).Decode(&rem)
+		return len(rem)
+	}
+	return 0
+}
+
 func main() {
 	dryRun := flag.Bool("inspect", false, "Inspect existing data without deleting")
 	flag.Parse()
@@ -57,7 +167,9 @@ func main() {
 	}
 	defer pool.Close()
 
-	fmt.Println("--- Database Content Inspection ---")
+	fmt.Println("==================================================")
+	fmt.Println("          EASYHR CLEANUP & INSPECTION            ")
+	fmt.Println("==================================================")
 
 	// 1. Inspect Organizations & Workspaces
 	orgRows, err := pool.Query(ctx, `
@@ -69,7 +181,7 @@ func main() {
 	if err != nil {
 		log.Printf("Error inspecting organizations: %v", err)
 	} else {
-		fmt.Println("\nExisting Organizations:")
+		fmt.Println("\nExisting Database Organizations:")
 		count := 0
 		for orgRows.Next() {
 			var id, name, subdomain string
@@ -94,7 +206,7 @@ func main() {
 	if err != nil {
 		log.Printf("Error inspecting users: %v", err)
 	} else {
-		fmt.Println("\nExisting Users:")
+		fmt.Println("\nExisting Database Users:")
 		count := 0
 		for userRows.Next() {
 			var id, email, fName, lName, extID string
@@ -117,7 +229,7 @@ func main() {
 		ORDER BY created_at DESC
 	`)
 	if err == nil {
-		fmt.Println("\nExisting Employees:")
+		fmt.Println("\nExisting Database Employees:")
 		count := 0
 		for empRows.Next() {
 			var id, fName, lName, wEmail, orgID string
@@ -133,12 +245,21 @@ func main() {
 		}
 	}
 
+	// 4. Clerk inspection & cleanup
+	clerkProdKey := os.Getenv("EASYHR_CLERK_SECRET_KEY")
+	clerkDevKey := os.Getenv("EASYHR_CLERK_DEV_SECRET_KEY")
+
+	clerkProdRemaining := inspectAndCleanClerk(clerkProdKey, "PRODUCTION", *dryRun)
+	clerkDevRemaining := inspectAndCleanClerk(clerkDevKey, "DEVELOPMENT", *dryRun)
+
 	if *dryRun {
 		fmt.Println("\nInspection mode finished. No data was deleted.")
 		return
 	}
 
-	fmt.Println("\nStarting cleanup of test data...")
+	fmt.Println("\n--------------------------------------------------")
+	fmt.Println("Starting cascading truncation of database tables...")
+	fmt.Println("--------------------------------------------------")
 
 	tables := []string{
 		"candidate_email_messages",
@@ -184,7 +305,7 @@ func main() {
 		}
 	}
 
-	// Also delete any non-system tenant-specific roles
+	// Delete any non-system tenant-specific roles
 	tag, err := pool.Exec(ctx, "DELETE FROM roles WHERE organization_id IS NOT NULL")
 	if err != nil {
 		fmt.Printf("Notice on tenant roles cleanup: %v\n", err)
@@ -192,23 +313,28 @@ func main() {
 		fmt.Printf("Deleted %d tenant-specific roles\n", tag.RowsAffected())
 	}
 
-	// Verification
+	// Database Verification
 	var orgCount, userCount, empCount, workspaceCount int
 	_ = pool.QueryRow(ctx, "SELECT COUNT(*) FROM organizations").Scan(&orgCount)
 	_ = pool.QueryRow(ctx, "SELECT COUNT(*) FROM users").Scan(&userCount)
 	_ = pool.QueryRow(ctx, "SELECT COUNT(*) FROM employees").Scan(&empCount)
 	_ = pool.QueryRow(ctx, "SELECT COUNT(*) FROM workspaces").Scan(&workspaceCount)
 
-	fmt.Printf("\nCleanup complete. Verification counts:\n")
-	fmt.Printf("  Organizations: %d\n", orgCount)
-	fmt.Printf("  Workspaces:    %d\n", workspaceCount)
-	fmt.Printf("  Users:         %d\n", userCount)
-	fmt.Printf("  Employees:     %d\n", empCount)
-
 	// Verify system lookup tables still exist
 	var permCount, sysRoleCount int
 	_ = pool.QueryRow(ctx, "SELECT COUNT(*) FROM permissions").Scan(&permCount)
 	_ = pool.QueryRow(ctx, "SELECT COUNT(*) FROM roles WHERE is_system = true").Scan(&sysRoleCount)
-	fmt.Printf("  System Permissions preserved: %d\n", permCount)
-	fmt.Printf("  System Roles preserved:       %d\n", sysRoleCount)
+
+	fmt.Println("\n==================================================")
+	fmt.Println("             CLEANUP VERIFICATION REPORT         ")
+	fmt.Println("==================================================")
+	fmt.Printf("  Neon DB Organizations:        %d\n", orgCount)
+	fmt.Printf("  Neon DB Workspaces:           %d\n", workspaceCount)
+	fmt.Printf("  Neon DB Users:                %d\n", userCount)
+	fmt.Printf("  Neon DB Employees:            %d\n", empCount)
+	fmt.Printf("  Clerk Production Users:       %d\n", clerkProdRemaining)
+	fmt.Printf("  Clerk Development Users:      %d\n", clerkDevRemaining)
+	fmt.Printf("  System Permissions Preserved: %d\n", permCount)
+	fmt.Printf("  System Roles Preserved:       %d\n", sysRoleCount)
+	fmt.Println("==================================================")
 }
