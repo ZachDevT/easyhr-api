@@ -76,6 +76,18 @@ func (s *Server) getMe(c echo.Context) error {
 		userRole = "Company Owner"
 	}
 
+	var empStatus, empID string
+	_ = s.pool.QueryRow(ctx, `
+		SELECT id::text, status
+		FROM employees
+		WHERE organization_id = $1
+		  AND (user_id = $2 OR (user_id IS NULL AND LOWER(work_email) = LOWER($3)))
+		ORDER BY created_at DESC
+		LIMIT 1`, principal.OrganizationID, principal.UserID, userEmail).Scan(&empID, &empStatus)
+	if empID != "" && principal.UserID != "" {
+		_, _ = s.pool.Exec(ctx, "UPDATE employees SET user_id = $1 WHERE id = $2::uuid AND user_id IS NULL", principal.UserID, empID)
+	}
+
 	// 2. Organization info
 	var orgName, orgCountryCode, orgTimezone string
 	_ = s.pool.QueryRow(ctx, `
@@ -107,13 +119,15 @@ func (s *Server) getMe(c echo.Context) error {
 		"organizationId": principal.OrganizationID,
 		"permissions":    permissions,
 		"user": map[string]any{
-			"id":        principal.UserID,
-			"email":     userEmail,
-			"firstName": userFirstName,
-			"lastName":  userLastName,
-			"phone":     userPhone,
-			"avatarUrl": userAvatarURL,
-			"role":      userRole,
+			"id":             principal.UserID,
+			"email":          userEmail,
+			"firstName":      userFirstName,
+			"lastName":       userLastName,
+			"phone":          userPhone,
+			"avatarUrl":      userAvatarURL,
+			"role":           userRole,
+			"employeeStatus": empStatus,
+			"employeeId":     empID,
 		},
 		"organization": map[string]any{
 			"id":          principal.OrganizationID,
