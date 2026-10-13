@@ -38,13 +38,14 @@ type CreateUploadIntentInput struct {
 }
 
 type Document struct {
-	ID         string  `json:"id"`
-	EmployeeID *string `json:"employeeId"`
-	Filename   string  `json:"filename"`
-	Category   string  `json:"category"`
-	Status     string  `json:"status"`
-	ExpiresOn  *string `json:"expiresOn"`
-	CreatedAt  string  `json:"createdAt"`
+	ID           string  `json:"id"`
+	EmployeeID   *string `json:"employeeId"`
+	EmployeeName string  `json:"employeeName,omitempty"`
+	Filename     string  `json:"filename"`
+	Category     string  `json:"category"`
+	Status       string  `json:"status"`
+	ExpiresOn    *string `json:"expiresOn"`
+	CreatedAt    string  `json:"createdAt"`
 }
 
 type UploadIntent struct {
@@ -54,18 +55,32 @@ type UploadIntent struct {
 }
 
 func (service *Service) List(ctx context.Context, organizationID, employeeID string, limit int) ([]Document, error) {
-	if employeeID == "" {
-		return nil, fmt.Errorf("employeeId is required")
-	}
 	if limit < 1 || limit > 100 {
 		return nil, fmt.Errorf("limit must be between 1 and 100")
 	}
-	rows, err := service.pool.Query(ctx, `
-		SELECT id::text, employee_id::text, filename, category, status, expires_on::text, created_at::text
-		FROM documents
-		WHERE organization_id = $1 AND employee_id = $2 AND status <> 'deleted'
-		ORDER BY created_at DESC, id DESC
-		LIMIT $3`, organizationID, employeeID, limit)
+
+	var rows pgx.Rows
+	var err error
+
+	if employeeID != "" {
+		rows, err = service.pool.Query(ctx, `
+			SELECT d.id::text, d.employee_id::text, COALESCE(e.first_name || ' ' || e.last_name, 'Team Member') as employee_name,
+				d.filename, d.category, d.status, d.expires_on::text, d.created_at::text
+			FROM documents d
+			LEFT JOIN employees e ON e.id = d.employee_id
+			WHERE d.organization_id = $1 AND d.employee_id = $2 AND d.status <> 'deleted'
+			ORDER BY d.created_at DESC, d.id DESC
+			LIMIT $3`, organizationID, employeeID, limit)
+	} else {
+		rows, err = service.pool.Query(ctx, `
+			SELECT d.id::text, d.employee_id::text, COALESCE(e.first_name || ' ' || e.last_name, 'Team Member') as employee_name,
+				d.filename, d.category, d.status, d.expires_on::text, d.created_at::text
+			FROM documents d
+			LEFT JOIN employees e ON e.id = d.employee_id
+			WHERE d.organization_id = $1 AND d.status <> 'deleted'
+			ORDER BY d.created_at DESC, d.id DESC
+			LIMIT $2`, organizationID, limit)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +88,7 @@ func (service *Service) List(ctx context.Context, organizationID, employeeID str
 	result := make([]Document, 0, limit)
 	for rows.Next() {
 		var item Document
-		if err = rows.Scan(&item.ID, &item.EmployeeID, &item.Filename, &item.Category, &item.Status, &item.ExpiresOn, &item.CreatedAt); err != nil {
+		if err = rows.Scan(&item.ID, &item.EmployeeID, &item.EmployeeName, &item.Filename, &item.Category, &item.Status, &item.ExpiresOn, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, item)

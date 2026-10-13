@@ -278,6 +278,31 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/benefits/enrollments/:employeeId", s.createBenefitEnrollment)
 		s.api.POST("/benefits/rewards/:employeeId", s.createRewardStatement)
 
+		// Workflows
+		s.api.GET("/workflows/definitions", s.listWorkflowDefinitions)
+		s.api.POST("/workflows/definitions", s.createWorkflowDefinition)
+		s.api.GET("/workflows/inbox", s.listInboxTasks)
+		s.api.POST("/workflows/tasks/:taskId/decide", s.decideWorkflowTask)
+
+		// Promotions
+		s.api.GET("/promotions", func(c echo.Context) error { return s.listPromotions(c) })
+		s.api.GET("/promotions/:employeeId", s.listPromotions)
+		s.api.POST("/promotions/:employeeId", s.executePromotion)
+
+		// Scheduling
+		s.api.GET("/scheduling/schedules", s.listShiftSchedules)
+		s.api.POST("/scheduling/schedules", s.createShiftSchedule)
+		s.api.GET("/scheduling/assignments/:employeeId", s.listShiftAssignments)
+		s.api.POST("/scheduling/assignments/:employeeId", s.createShiftAssignment)
+
+		// Holidays
+		s.api.GET("/holidays", s.listHolidays)
+		s.api.POST("/holidays", s.createHoliday)
+
+		// Offboarding
+		s.api.GET("/offboarding/plans", s.listOffboardingPlans)
+		s.api.POST("/offboarding/plans", s.createOffboardingPlan)
+
 		s.authenticated.POST("/setup/organizations", s.createOrganization)
 		s.authenticated.POST("/auth/provision", s.provisionIdentity)
 		s.authenticated.GET("/setup/status", s.checkSetupStatus)
@@ -474,21 +499,25 @@ func (s *Server) listDocuments(c echo.Context) error {
 	}
 	employeeID := strings.TrimSpace(c.QueryParam("employeeId"))
 	if employeeID == "" {
-		return problem(c, http.StatusUnprocessableEntity, "validation.employee_id_required", "Employee required", "employeeId is required")
-	}
-	isSelf, err := s.people.IsEmployeeUser(c.Request().Context(), principal.OrganizationID, employeeID, principal.UserID)
-	if err != nil {
-		return problem(c, http.StatusInternalServerError, "documents.access_lookup_failed", "Internal server error", "Could not verify employee access")
-	}
-	if !isSelf && !principal.HasPermission("documents:read") && !principal.HasPermission("documents:manage") {
-		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You may only view your own documents")
+		if !principal.HasPermission("documents:read") && !principal.HasPermission("documents:manage") {
+			_ = s.pool.QueryRow(c.Request().Context(), "SELECT id FROM employees WHERE user_id = $1 AND organization_id = $2", principal.UserID, principal.OrganizationID).Scan(&employeeID)
+		}
+	} else {
+		isSelf, err := s.people.IsEmployeeUser(c.Request().Context(), principal.OrganizationID, employeeID, principal.UserID)
+		if err != nil {
+			return problem(c, http.StatusInternalServerError, "documents.access_lookup_failed", "Internal server error", "Could not verify employee access")
+		}
+		if !isSelf && !principal.HasPermission("documents:read") && !principal.HasPermission("documents:manage") {
+			return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You may only view your own documents")
+		}
 	}
 	limit := 25
 	if raw := c.QueryParam("limit"); raw != "" {
-		limit, err = strconv.Atoi(raw)
+		parsedLimit, err := strconv.Atoi(raw)
 		if err != nil {
 			return problem(c, http.StatusUnprocessableEntity, "validation.invalid_limit", "Invalid limit", "limit must be an integer")
 		}
+		limit = parsedLimit
 	}
 	result, err := s.documents.List(c.Request().Context(), principal.OrganizationID, employeeID, limit)
 	if err != nil {
