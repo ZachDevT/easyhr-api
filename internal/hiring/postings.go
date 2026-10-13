@@ -16,6 +16,8 @@ type JobPosting struct {
 	Status         string  `json:"status"`
 	DepartmentID   *string `json:"departmentId"`
 	DepartmentName string  `json:"departmentName"`
+	PositionID     *string `json:"positionId"`
+	PositionTitle  *string `json:"positionTitle,omitempty"`
 	ApplicantCount int     `json:"applicantCount"`
 	CreatedAt      string  `json:"createdAt"`
 }
@@ -27,6 +29,7 @@ type CreateJobPostingInput struct {
 	EmploymentType string  `json:"employmentType"`
 	Status         string  `json:"status"`
 	DepartmentID   *string `json:"departmentId"`
+	PositionID     *string `json:"positionId"`
 }
 
 func (service *Service) ListPostings(ctx context.Context, organizationID string) ([]JobPosting, error) {
@@ -37,13 +40,16 @@ func (service *Service) ListPostings(ctx context.Context, organizationID string)
 			jp.description, 
 			jp.location, 
 			jp.employment_type, 
-			jp.status,
+			jp.status, 
 			jp.department_id::text,
 			COALESCE(d.name, '') AS department_name,
+			jp.position_id::text,
+			dp.title AS position_title,
 			COALESCE(ac.cnt, 0) AS applicant_count,
 			to_char(jp.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
 		FROM job_postings jp
 		LEFT JOIN departments d ON d.id = jp.department_id
+		LEFT JOIN department_positions dp ON dp.id = jp.position_id
 		LEFT JOIN (
 			SELECT job_posting_id, COUNT(*) AS cnt
 			FROM job_applicants
@@ -63,7 +69,8 @@ func (service *Service) ListPostings(ctx context.Context, organizationID string)
 		if err := rows.Scan(
 			&p.ID, &p.Title, &p.Description, &p.Location,
 			&p.EmploymentType, &p.Status, &p.DepartmentID,
-			&p.DepartmentName, &p.ApplicantCount, &p.CreatedAt,
+			&p.DepartmentName, &p.PositionID, &p.PositionTitle,
+			&p.ApplicantCount, &p.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -80,13 +87,16 @@ func (service *Service) ListPublicPostings(ctx context.Context, organizationID s
 			jp.description, 
 			jp.location, 
 			jp.employment_type, 
-			jp.status,
+			jp.status, 
 			jp.department_id::text,
 			COALESCE(d.name, '') AS department_name,
+			jp.position_id::text,
+			dp.title AS position_title,
 			0 AS applicant_count,
 			to_char(jp.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
 		FROM job_postings jp
 		LEFT JOIN departments d ON d.id = jp.department_id
+		LEFT JOIN department_positions dp ON dp.id = jp.position_id
 		WHERE jp.organization_id = $1 AND jp.status = 'published'
 		ORDER BY jp.created_at DESC
 	`, organizationID)
@@ -101,7 +111,8 @@ func (service *Service) ListPublicPostings(ctx context.Context, organizationID s
 		if err := rows.Scan(
 			&p.ID, &p.Title, &p.Description, &p.Location,
 			&p.EmploymentType, &p.Status, &p.DepartmentID,
-			&p.DepartmentName, &p.ApplicantCount, &p.CreatedAt,
+			&p.DepartmentName, &p.PositionID, &p.PositionTitle,
+			&p.ApplicantCount, &p.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -120,19 +131,22 @@ func (service *Service) CreatePosting(ctx context.Context, organizationID, actor
 	}
 	var p JobPosting
 	err := service.pool.QueryRow(ctx, `
-		INSERT INTO job_postings (organization_id, title, description, location, employment_type, status, department_id, created_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO job_postings (organization_id, title, description, location, employment_type, status, department_id, position_id, created_by_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING 
 			id::text, title, description, location, employment_type, status, 
 			department_id::text,
 			'' AS department_name,
+			position_id::text,
+			NULL AS position_title,
 			0 AS applicant_count,
 			to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
 	`, organizationID, strings.TrimSpace(input.Title), input.Description, input.Location,
-		input.EmploymentType, status, input.DepartmentID, actorUserID).Scan(
+		input.EmploymentType, status, input.DepartmentID, input.PositionID, actorUserID).Scan(
 		&p.ID, &p.Title, &p.Description, &p.Location,
 		&p.EmploymentType, &p.Status, &p.DepartmentID,
-		&p.DepartmentName, &p.ApplicantCount, &p.CreatedAt,
+		&p.DepartmentName, &p.PositionID, &p.PositionTitle,
+		&p.ApplicantCount, &p.CreatedAt,
 	)
 	if err != nil {
 		return JobPosting{}, err
