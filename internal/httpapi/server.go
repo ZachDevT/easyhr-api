@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strconv"
@@ -1261,13 +1262,13 @@ func (s *Server) sendOnboardingInvitation(c echo.Context) error {
 		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request body", err.Error())
 	}
 
-	var orgName, logoURL, brandColor, websiteURL string
+	var orgName, logoURL, brandColor, websiteURL, subdomain string
 	_ = s.pool.QueryRow(c.Request().Context(), `
-		SELECT o.name, COALESCE(w.logo_url, ''), COALESCE(w.brand_color, '#4F46E5'), COALESCE(lp.website_url, '')
+		SELECT o.name, COALESCE(w.logo_url, ''), COALESCE(w.brand_color, '#4F46E5'), COALESCE(lp.website_url, ''), COALESCE(w.subdomain, '')
 		FROM organizations o
 		LEFT JOIN workspaces w ON w.organization_id = o.id
 		LEFT JOIN organization_legal_profiles lp ON lp.organization_id = o.id
-		WHERE o.id = $1`, principal.OrganizationID).Scan(&orgName, &logoURL, &brandColor, &websiteURL)
+		WHERE o.id = $1`, principal.OrganizationID).Scan(&orgName, &logoURL, &brandColor, &websiteURL, &subdomain)
 
 	if req.CompanyName == "" {
 		req.CompanyName = orgName
@@ -1293,6 +1294,14 @@ func (s *Server) sendOnboardingInvitation(c echo.Context) error {
 		}
 		if req.JobTitle == "" {
 			req.JobTitle = job
+		}
+	}
+
+	if req.PortalURL == "" {
+		if subdomain != "" {
+			req.PortalURL = fmt.Sprintf("https://%s.easyhr.pro/auth/accept-invite?email=%s&name=%s&redirect_url=/my-onboarding", subdomain, url.QueryEscape(req.Email), url.QueryEscape(req.Name))
+		} else {
+			req.PortalURL = fmt.Sprintf("https://easyhr.pro/auth/accept-invite?email=%s&name=%s&redirect_url=/my-onboarding", url.QueryEscape(req.Email), url.QueryEscape(req.Name))
 		}
 	}
 
@@ -2019,9 +2028,10 @@ func (s *Server) updateApplicantStatus(c echo.Context) error {
 				LEFT JOIN workspaces w ON w.organization_id = o.id
 				WHERE o.id = $1`, orgID).Scan(&subdomain, &brandColor, &logoURL, &orgName)
 
-			portalURL := fmt.Sprintf("https://%s.easyhr.pro/my-onboarding", subdomain)
+			fullName := strings.TrimSpace(applicant.FirstName + " " + applicant.LastName)
+			portalURL := fmt.Sprintf("https://%s.easyhr.pro/auth/accept-invite?email=%s&name=%s&redirect_url=/my-onboarding", subdomain, url.QueryEscape(applicant.Email), url.QueryEscape(fullName))
 			if subdomain == "" {
-				portalURL = "https://easyhr.pro/my-onboarding"
+				portalURL = fmt.Sprintf("https://easyhr.pro/auth/accept-invite?email=%s&name=%s&redirect_url=/my-onboarding", url.QueryEscape(applicant.Email), url.QueryEscape(fullName))
 			}
 
 			if applicant.Email != "" {

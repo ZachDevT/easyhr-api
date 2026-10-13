@@ -206,7 +206,7 @@ func (s *Service) SendWelcomeOrganizationCreator(ctx context.Context, toEmail, o
 		companyName = "Your Organization"
 	}
 
-	subject := fmt.Sprintf("Welcome to ProjectEasyHR, %s! Your workspace %s is live 🚀", ownerName, companyName)
+	subject := fmt.Sprintf("Welcome to ProjectEasyHR, %s! Your workspace %s is live", ownerName, companyName)
 
 	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
@@ -318,7 +318,7 @@ func (s *Service) SendOnboardingInvitationWithBranding(ctx context.Context, toEm
 	}
 
 	if portalURL == "" {
-		portalURL = "http://localhost:3000/my-onboarding"
+		portalURL = "https://easyhr.pro/auth/accept-invite?redirect_url=/my-onboarding"
 	}
 	if branding.CompanyName == "" {
 		branding.CompanyName = "ProjectEasyHR"
@@ -330,7 +330,7 @@ func (s *Service) SendOnboardingInvitationWithBranding(ctx context.Context, toEm
 		startDate = time.Now().Format("Jan 02, 2006")
 	}
 
-	subject := fmt.Sprintf("Welcome to %s! Start your onboarding on ProjectEasyHR 🎉", branding.CompanyName)
+	subject := fmt.Sprintf("Welcome to %s! Start your onboarding on ProjectEasyHR", branding.CompanyName)
 
 	// Company logo HTML or branded initial box
 	logoHTML := fmt.Sprintf(`<div style="display:inline-flex;align-items:center;justify-content:center;width:52px;height:52px;background:rgba(255,255,255,0.2);border:2px solid white;border-radius:12px;font-size:24px;font-weight:900;color:white;margin-bottom:12px;">%s</div>`, string(branding.CompanyName[0]))
@@ -371,7 +371,7 @@ func (s *Service) SendOnboardingInvitationWithBranding(ctx context.Context, toEm
   <div class="card">
     <div class="header">
       %s
-      <h1>Welcome to %s! 🎉</h1>
+      <h1>Welcome to %s!</h1>
       <p>Your team onboarding portal is ready</p>
     </div>
     <div class="body">
@@ -444,7 +444,7 @@ func (s *Service) SendJobOfferNotification(ctx context.Context, toEmail, candida
 		branding.BrandColor = "#059669"
 	}
 
-	subject := fmt.Sprintf("Formal Job Offer: %s at %s 🎊", jobTitle, branding.CompanyName)
+	subject := fmt.Sprintf("Formal Job Offer: %s at %s", jobTitle, branding.CompanyName)
 
 	logoHTML := fmt.Sprintf(`<div style="display:inline-flex;align-items:center;justify-content:center;width:52px;height:52px;background:rgba(255,255,255,0.2);border:2px solid white;border-radius:12px;font-size:24px;font-weight:900;color:white;margin-bottom:12px;">%s</div>`, string(branding.CompanyName[0]))
 	if branding.LogoURL != "" {
@@ -475,7 +475,7 @@ func (s *Service) SendJobOfferNotification(ctx context.Context, toEmail, candida
   <div class="card">
     <div class="header">
       %s
-      <h1>Congratulations! 🎉</h1>
+      <h1>Congratulations!</h1>
       <p>Job Offer from %s</p>
     </div>
     <div class="body">
