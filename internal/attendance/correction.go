@@ -51,7 +51,7 @@ func (service *Service) CreateCorrection(ctx context.Context, org, actor, punchI
 	if err != nil {
 		return Correction{}, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'attendance.punch_corrected','attendance_correction',$3,'unknown',jsonb_build_object('originalPunchId',$4))`, org, actor, result.ID, punchID); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'attendance.punch_corrected','attendance_correction',$3,'unknown',jsonb_build_object('originalPunchId',$4::text))`, org, actor, result.ID, punchID); err != nil {
 		return Correction{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

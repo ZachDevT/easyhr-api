@@ -84,7 +84,7 @@ func (service *Service) CreateSelfPunch(ctx context.Context, org, userID string,
 	if err != nil {
 		return Punch{}, err
 	}
-	_, err = service.pool.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'attendance.punch_created','attendance_punch',$3,'unknown',jsonb_build_object('kind',$4,'source',$5))`, org, userID, result.ID, input.Kind, input.Source)
+	_, err = service.pool.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'attendance.punch_created','attendance_punch',$3,'unknown',jsonb_build_object('kind',$4::text,'source',$5::text))`, org, userID, result.ID, input.Kind, input.Source)
 	if err != nil {
 		return Punch{}, err
 	}

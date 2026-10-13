@@ -67,8 +67,15 @@ func (service *Service) CreatePolicy(ctx context.Context, org, actor string, inp
 	if !typeExists {
 		return LeavePolicy{}, ErrRequestNotFound
 	}
+
+	tx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return LeavePolicy{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	result := LeavePolicy{LeaveTypeID: input.LeaveTypeID, Name: input.Name, AccrualFrequency: input.AccrualFrequency, AccrualMinutes: input.AccrualMinutes, CarryoverLimitMinutes: input.CarryoverLimitMinutes, AllowsNegativeBalance: input.AllowsNegativeBalance, EffectiveFrom: input.EffectiveFrom, Status: "active"}
-	err := service.pool.QueryRow(ctx, `INSERT INTO leave_policies (organization_id,leave_type_id,name,accrual_frequency,accrual_minutes,carryover_limit_minutes,allows_negative_balance,effective_from,status,created_by_user_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9) RETURNING id::text`, org, result.LeaveTypeID, result.Name, result.AccrualFrequency, result.AccrualMinutes, result.CarryoverLimitMinutes, result.AllowsNegativeBalance, result.EffectiveFrom, actor).Scan(&result.ID)
+	err = tx.QueryRow(ctx, `INSERT INTO leave_policies (organization_id,leave_type_id,name,accrual_frequency,accrual_minutes,carryover_limit_minutes,allows_negative_balance,effective_from,status,created_by_user_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9) RETURNING id::text`, org, result.LeaveTypeID, result.Name, result.AccrualFrequency, result.AccrualMinutes, result.CarryoverLimitMinutes, result.AllowsNegativeBalance, result.EffectiveFrom, actor).Scan(&result.ID)
 	if err != nil {
 		var pge *pgconn.PgError
 		if errors.As(err, &pge) && pge.Code == "23505" {
@@ -76,8 +83,11 @@ func (service *Service) CreatePolicy(ctx context.Context, org, actor string, inp
 		}
 		return LeavePolicy{}, err
 	}
-	_, err = service.pool.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_policy.created','leave_policy',$3,'unknown',jsonb_build_object('accrualMinutes',$4,'allowsNegativeBalance',$5))`, org, actor, result.ID, result.AccrualMinutes, result.AllowsNegativeBalance)
+	_, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_policy.created','leave_policy',$3,'unknown',jsonb_build_object('accrualMinutes',$4::int,'allowsNegativeBalance',$5::boolean))`, org, actor, result.ID, result.AccrualMinutes, result.AllowsNegativeBalance)
 	if err != nil {
+		return LeavePolicy{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
 		return LeavePolicy{}, err
 	}
 	return result, nil
@@ -116,7 +126,7 @@ func (service *Service) AssignPolicy(ctx context.Context, org, actor, policyID s
 	if _, err = tx.Exec(ctx, `INSERT INTO leave_policy_assignments (employee_id,leave_policy_id,effective_from,created_by_user_id) VALUES ($1,$2,$3,$4)`, input.EmployeeID, policyID, input.EffectiveFrom, actor); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_policy.assigned','leave_policy',$3,'unknown',jsonb_build_object('employeeId',$4))`, org, actor, policyID, input.EmployeeID)
+	_, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_policy.assigned','leave_policy',$3,'unknown',jsonb_build_object('employeeId',$4::text))`, org, actor, policyID, input.EmployeeID)
 	if err != nil {
 		return err
 	}

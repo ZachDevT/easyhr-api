@@ -132,7 +132,7 @@ func (service *Service) CreateLeaveType(ctx context.Context, organizationID, act
 	}
 
 	result.ID = typeID
-	_, _ = service.pool.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_type.saved','leave_type',$3,'unknown',jsonb_build_object('paid',$4,'unit',$5))`, organizationID, actorUserID, result.ID, result.IsPaid, result.Unit)
+	_, _ = service.pool.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_type.saved','leave_type',$3,'unknown',jsonb_build_object('paid',$4::boolean,'unit',$5::text))`, organizationID, actorUserID, result.ID, result.IsPaid, result.Unit)
 	return result, nil
 }
 

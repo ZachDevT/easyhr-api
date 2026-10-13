@@ -104,7 +104,7 @@ func (service *Service) CreateTemplate(ctx context.Context, org, actor string, i
 			return Template{}, err
 		}
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'onboarding_template.created','onboarding_template',$3,'unknown',jsonb_build_object('taskCount',$4))`, org, actor, result.ID, result.TaskCount); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'onboarding_template.created','onboarding_template',$3,'unknown',jsonb_build_object('taskCount',$4::int))`, org, actor, result.ID, result.TaskCount); err != nil {
 		return Template{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

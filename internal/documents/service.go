@@ -144,7 +144,7 @@ func (service *Service) CreateUploadIntent(ctx context.Context, organizationID, 
 	if err != nil {
 		return UploadIntent{}, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id, actor_user_id, action, resource_type, resource_id, request_id, metadata) VALUES ($1, $2, 'document.upload_intent_created', 'document', $3, 'unknown', jsonb_build_object('category', $4, 'sizeBytes', $5))`, organizationID, actorUserID, result.Document.ID, input.Category, input.SizeBytes); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id, actor_user_id, action, resource_type, resource_id, request_id, metadata) VALUES ($1, $2, 'document.upload_intent_created', 'document', $3, 'unknown', jsonb_build_object('category', $4::text, 'sizeBytes', $5::bigint))`, organizationID, actorUserID, result.Document.ID, input.Category, input.SizeBytes); err != nil {
 		return UploadIntent{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -182,7 +182,7 @@ func (service *Service) CompleteUpload(ctx context.Context, organizationID, acto
 	if _, err = tx.Exec(ctx, `INSERT INTO document_versions (document_id, version_number, object_key, sha256, size_bytes, created_by_user_id) VALUES ($1, 1, $2, lower($3), $4, $5)`, documentID, objectKey, checksum, sizeBytes, actorUserID); err != nil {
 		return Document{}, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO outbox_events (organization_id, event_type, aggregate_type, aggregate_id, payload) VALUES ($1, 'document.scan_requested', 'document', $2, jsonb_build_object('documentId', $2, 'objectKey', $3))`, organizationID, documentID, objectKey); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO outbox_events (organization_id, event_type, aggregate_type, aggregate_id, payload) VALUES ($1, 'document.scan_requested', 'document', $2, jsonb_build_object('documentId', $2::text, 'objectKey', $3::text))`, organizationID, documentID, objectKey); err != nil {
 		return Document{}, err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id, actor_user_id, action, resource_type, resource_id, request_id) VALUES ($1, $2, 'document.upload_completed', 'document', $3, 'unknown')`, organizationID, actorUserID, documentID); err != nil {

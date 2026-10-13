@@ -124,7 +124,7 @@ func (directory *Directory) Update(ctx context.Context, organizationID, actorUse
 			return EmployeeProfile{}, err
 		}
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id, actor_user_id, action, resource_type, resource_id, request_id, metadata) VALUES ($1, $2, 'employee.profile_updated', 'employee', $3, 'unknown', jsonb_build_object('firstName', $4, 'lastName', $5, 'personalEmail', $6, 'departmentId', $7, 'managerId', $8, 'jobTitle', $9))`, organizationID, actorUserID, employeeID, input.FirstName.Set, input.LastName.Set, input.PersonalEmail.Set, input.DepartmentID.Set, input.ManagerID.Set, input.JobTitle.Set); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id, actor_user_id, action, resource_type, resource_id, request_id, metadata) VALUES ($1, $2, 'employee.profile_updated', 'employee', $3, 'unknown', jsonb_build_object('firstName', $4::text, 'lastName', $5::text, 'personalEmail', $6::text, 'departmentId', $7::text, 'managerId', $8::text, 'jobTitle', $9::text))`, organizationID, actorUserID, employeeID, input.FirstName.Set, input.LastName.Set, input.PersonalEmail.Set, input.DepartmentID.Set, input.ManagerID.Set, input.JobTitle.Set); err != nil {
 		return EmployeeProfile{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

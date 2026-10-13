@@ -43,7 +43,7 @@ func (service *Service) PublishTemplate(ctx context.Context, organizationID, act
 	result.Status = "published"
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO audit_events (organization_id, actor_user_id, action, resource_type, resource_id, request_id, metadata)
-		VALUES ($1, $2, 'onboarding_template.published', 'onboarding_template', $3, 'unknown', jsonb_build_object('version', $4))`,
+		VALUES ($1, $2, 'onboarding_template.published', 'onboarding_template', $3, 'unknown', jsonb_build_object('version', $4::int))`,
 		organizationID, actorUserID, templateID, result.Version); err != nil {
 		return Template{}, err
 	}

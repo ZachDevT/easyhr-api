@@ -54,7 +54,7 @@ func (service *Service) ApproveHR(ctx context.Context, organizationID, approverU
 	if _, err = tx.Exec(ctx, `UPDATE leave_requests SET status='approved',updated_at=now() WHERE id=$1`, requestID); err != nil {
 		return DecisionResult{}, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_request.hr_approved','leave_request',$3,'unknown',jsonb_build_object('requestedMinutes',$4))`, organizationID, approverUserID, requestID, requested); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'leave_request.hr_approved','leave_request',$3,'unknown',jsonb_build_object('requestedMinutes',$4::int))`, organizationID, approverUserID, requestID, requested); err != nil {
 		return DecisionResult{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

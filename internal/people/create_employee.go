@@ -131,7 +131,7 @@ func (directory *Directory) Create(ctx context.Context, organizationID, actorUse
 	if _, err := tx.Exec(ctx, `INSERT INTO employee_status_events (employee_id,new_status,effective_on,reason,created_by_user_id) VALUES ($1,'onboarding',$2,'Initial employee record created',$3)`, result.ID, input.HiredOn, actorUserID); err != nil {
 		return CreateEmployeeResult{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'employee.created','employee',$3,$4,jsonb_build_object('employeeNumber',$5))`, organizationID, actorUserID, result.ID, requestID, input.EmployeeNumber); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_events (organization_id,actor_user_id,action,resource_type,resource_id,request_id,metadata) VALUES ($1,$2,'employee.created','employee',$3,$4,jsonb_build_object('employeeNumber',$5::text))`, organizationID, actorUserID, result.ID, requestID, input.EmployeeNumber); err != nil {
 		return CreateEmployeeResult{}, err
 	}
 	body, err := json.Marshal(result)

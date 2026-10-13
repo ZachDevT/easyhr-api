@@ -112,7 +112,7 @@ func (service *Service) UpdateTask(ctx context.Context, organizationID, actorUse
 	}
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO audit_events (organization_id, actor_user_id, action, resource_type, resource_id, request_id, metadata)
-		VALUES ($1, $2, $3, 'onboarding_task', $4, 'unknown', jsonb_build_object('status', $5))`,
+		VALUES ($1, $2, $3, 'onboarding_task', $4, 'unknown', jsonb_build_object('status', $5::text))`,
 		organizationID, actorUserID, "onboarding_task."+input.Status, taskID, input.Status); err != nil {
 		return Task{}, err
 	}
