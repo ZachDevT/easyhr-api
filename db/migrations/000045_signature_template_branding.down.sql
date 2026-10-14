@@ -5,5 +5,7 @@ ALTER TABLE signature_requests DROP COLUMN IF EXISTS logo_url;
 ALTER TABLE signature_requests DROP COLUMN IF EXISTS brand_color;
 ALTER TABLE signature_requests DROP COLUMN IF EXISTS footer_rendered;
 ALTER TABLE signature_requests DROP COLUMN IF EXISTS header_rendered;
+ALTER TABLE signature_requests DROP COLUMN IF EXISTS template_id;
+DROP TABLE IF EXISTS signature_templates;
 ALTER TABLE signature_templates DROP COLUMN IF EXISTS footer_text;
 ALTER TABLE signature_templates DROP COLUMN IF EXISTS header_text;
