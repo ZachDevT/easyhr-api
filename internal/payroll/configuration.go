@@ -28,6 +28,10 @@ type TaxRule struct {
 	RuleType    string    `json:"ruleType"`
 	Bands       []TaxBand `json:"bands"`
 	RatePercent float64   `json:"ratePercent"`
+	AmountMinor int64     `json:"amountMinor"`
+	AppliesTo   string    `json:"appliesTo"`
+	AppliesToID string    `json:"appliesToId,omitempty"`
+	Cadence     string    `json:"cadence"`
 	Active      bool      `json:"active"`
 }
 
@@ -38,6 +42,10 @@ type TaxRuleInput struct {
 	RuleType    string    `json:"ruleType"`
 	Bands       []TaxBand `json:"bands"`
 	RatePercent float64   `json:"ratePercent"`
+	AmountMinor int64     `json:"amountMinor"`
+	AppliesTo   string    `json:"appliesTo"`
+	AppliesToID string    `json:"appliesToId,omitempty"`
+	Cadence     string    `json:"cadence"`
 }
 
 func (service *Service) CreateConfiguration(ctx context.Context, organizationID string, input CreateConfigurationInput) (Configuration, error) {

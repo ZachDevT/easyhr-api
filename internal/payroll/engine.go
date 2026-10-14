@@ -65,7 +65,10 @@ func (e *ConfiguredEngine) Calculate(ctx context.Context, config Configuration, 
 	if ccy != config.Currency {
 		return RunItemData{}, ErrCompensationCurrencyMismatch
 	}
-	rows, err := e.pool.Query(ctx, `SELECT rule_type,bands,rate_percent FROM payroll_tax_rules WHERE organization_id=$1 AND country=$2 AND active=true ORDER BY id`, config.OrganizationID, config.Country)
+	rows, err := e.pool.Query(ctx, `SELECT r.rule_type,r.bands,r.rate_percent,r.amount_minor,r.applies_to,r.applies_to_id::text
+		FROM payroll_tax_rules r
+		WHERE r.organization_id=$1 AND r.country=$2 AND r.active=true
+		AND (r.applies_to='all_employees' OR (r.applies_to='department' AND EXISTS (SELECT 1 FROM employment_assignments ea WHERE ea.employee_id=$3 AND ea.effective_to IS NULL AND ea.department_id=r.applies_to_id)) OR (r.applies_to='position' AND EXISTS (SELECT 1 FROM employment_assignments ea WHERE ea.employee_id=$3 AND ea.effective_to IS NULL AND ea.position_id=r.applies_to_id))) ORDER BY r.id`, config.OrganizationID, config.Country, employeeID)
 	if err != nil {
 		return RunItemData{}, err
 	}
@@ -76,12 +79,19 @@ func (e *ConfiguredEngine) Calculate(ctx context.Context, config Configuration, 
 		var kind string
 		var raw []byte
 		var rate float64
-		if err := rows.Scan(&kind, &raw, &rate); err != nil {
+		var amount int64
+		var scope string
+		var scopeID *string
+		if err := rows.Scan(&kind, &raw, &rate, &amount, &scope, &scopeID); err != nil {
 			return RunItemData{}, err
 		}
 		rules++
 		if kind == "flat_deduction" {
-			deductions += base * int64(rate*10000) / 1_000_000
+			if amount > 0 {
+				deductions += amount
+			} else {
+				deductions += base * int64(rate*10000) / 1_000_000
+			}
 			continue
 		}
 		var bands []TaxBand

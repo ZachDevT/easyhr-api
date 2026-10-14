@@ -39,6 +39,7 @@ type CreateEmployeeInput struct {
 	DivisionID      string `json:"divisionId,omitempty"`
 	LocationID      string `json:"locationId,omitempty"`
 	ManagerID       string `json:"managerId,omitempty"`
+	PositionID      string `json:"positionId,omitempty"`
 	SendInvitation  bool   `json:"sendInvitation,omitempty"`
 }
 
@@ -73,6 +74,9 @@ type CreateEmployeeResult struct {
 }
 
 func (input CreateEmployeeInput) Validate() error {
+	if strings.TrimSpace(input.DepartmentID) == "" || strings.TrimSpace(input.PositionID) == "" {
+		return fmt.Errorf("departmentId and positionId are required; choose a department role before creating the employee")
+	}
 	for field, rule := range map[string]struct {
 		value string
 		max   int
@@ -147,7 +151,7 @@ func (directory *Directory) Create(ctx context.Context, organizationID, actorUse
 	if _, err := tx.Exec(ctx, `INSERT INTO employment_terms (employee_id,effective_from,employment_type,worker_type,work_arrangement,fte_basis_points,pay_type,created_by_user_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, result.ID, input.HiredOn, input.EmploymentType, input.WorkerType, input.WorkArrangement, input.FTEBasisPoints, input.PayType, actorUserID); err != nil {
 		return CreateEmployeeResult{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO employment_assignments (employee_id,department_id,division_id,location_id,manager_employee_id,job_title,effective_from,created_by_user_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, result.ID, nullString(input.DepartmentID), nullString(input.DivisionID), nullString(input.LocationID), nullString(input.ManagerID), strings.TrimSpace(input.JobTitle), input.HiredOn, actorUserID); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO employment_assignments (employee_id,department_id,division_id,location_id,manager_employee_id,job_title,effective_from,created_by_user_id,position_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,'')::uuid)`, result.ID, nullString(input.DepartmentID), nullString(input.DivisionID), nullString(input.LocationID), nullString(input.ManagerID), strings.TrimSpace(input.JobTitle), input.HiredOn, actorUserID, input.PositionID); err != nil {
 		return CreateEmployeeResult{}, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO employee_status_events (employee_id,new_status,effective_on,reason,created_by_user_id) VALUES ($1,'onboarding',$2,'Initial employee record created',$3)`, result.ID, input.HiredOn, actorUserID); err != nil {
@@ -181,6 +185,15 @@ func validateReferences(ctx context.Context, tx pgx.Tx, org string, input Create
 		}
 		if !ok {
 			return fmt.Errorf("%s does not belong to this organization", ref.field)
+		}
+	}
+	if input.PositionID != "" {
+		var valid bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM department_positions WHERE id=$1 AND organization_id=$2 AND department_id=NULLIF($3,'')::uuid AND status='active')`, input.PositionID, org, input.DepartmentID).Scan(&valid); err != nil {
+			return err
+		}
+		if !valid {
+			return fmt.Errorf("positionId must be an active position in the selected department")
 		}
 	}
 	return nil

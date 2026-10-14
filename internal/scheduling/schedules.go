@@ -44,8 +44,30 @@ func (service *Service) ListSchedules(ctx context.Context, organizationID string
 		if err := rows.Scan(&item.ID, &item.Name, &item.Timezone, &item.Description); err != nil {
 			return nil, err
 		}
-		item.Entries = []ShiftEntry{} // In a real robust implementation, we'd batch fetch entries here
+		item.Entries = []ShiftEntry{}
 		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range items {
+		entries, err := service.pool.Query(ctx, `SELECT day_of_week,start_time::text,end_time::text,break_minutes FROM shift_entries WHERE schedule_id=$1 ORDER BY day_of_week`, items[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		for entries.Next() {
+			var entry ShiftEntry
+			if err := entries.Scan(&entry.DayOfWeek, &entry.StartTime, &entry.EndTime, &entry.BreakMinutes); err != nil {
+				entries.Close()
+				return nil, err
+			}
+			items[i].Entries = append(items[i].Entries, entry)
+		}
+		if err := entries.Err(); err != nil {
+			entries.Close()
+			return nil, err
+		}
+		entries.Close()
 	}
 	return items, nil
 }
