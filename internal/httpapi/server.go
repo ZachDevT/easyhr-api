@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -31,12 +32,12 @@ import (
 	"github.com/easyhr/easyhr-be/internal/benefits"
 	"github.com/easyhr/easyhr-be/internal/celebrations"
 	"github.com/easyhr/easyhr-be/internal/documents"
-	"github.com/easyhr/easyhr-be/internal/notifications"
 	"github.com/easyhr/easyhr-be/internal/email"
 	"github.com/easyhr/easyhr-be/internal/hiring"
-	"github.com/easyhr/easyhr-be/internal/messaging"
 	"github.com/easyhr/easyhr-be/internal/holidays"
 	"github.com/easyhr/easyhr-be/internal/identity"
+	"github.com/easyhr/easyhr-be/internal/messaging"
+	"github.com/easyhr/easyhr-be/internal/notifications"
 	"github.com/easyhr/easyhr-be/internal/offboarding"
 	"github.com/easyhr/easyhr-be/internal/onboarding"
 	"github.com/easyhr/easyhr-be/internal/operations"
@@ -57,6 +58,7 @@ import (
 
 type Server struct {
 	echo          *echo.Echo
+	publicLimit   echo.MiddlewareFunc
 	pool          *pgxpool.Pool
 	api           *echo.Group
 	authenticated *echo.Group
@@ -107,6 +109,8 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 	e.HTTPErrorHandler = problemHandler
 	e.Use(middleware.RequestID())
 	e.Use(middleware.Recover())
+	// Keep abuse controls local to unauthenticated public endpoints so normal
+	// authenticated HR workflows are not throttled by anonymous traffic.
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOriginFunc: func(origin string) (bool, error) {
 			if origin == "" {
@@ -136,7 +140,8 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 	}))
 
 	emailSvc := email.NewService(os.Getenv("RESEND_API_KEY"), os.Getenv("EMAIL_FROM"), os.Getenv("EMAIL_FROM_NAME"))
-	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), storage: documentStorage, setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool, signatures.NewDocuSignClient("https://demo.docusign.net", "dummy-key", []byte{})), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), operations: operations.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool), email: emailSvc, messaging: messaging.NewService(pool, emailSvc), announcements: announcements.NewService(pool), celebrations: celebrations.NewService(pool), notifications: notifications.NewService(pool)}
+	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), storage: documentStorage, setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), operations: operations.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool), email: emailSvc, messaging: messaging.NewService(pool, emailSvc), announcements: announcements.NewService(pool), celebrations: celebrations.NewService(pool), notifications: notifications.NewService(pool)}
+	s.publicLimit = s.databaseRateLimit(20, time.Minute)
 	if authentication != nil {
 		s.authenticated = e.Group("/api/v1")
 		s.authenticated.Use(adaptHTTPMiddleware(authentication))
@@ -179,12 +184,39 @@ func adaptHTTPMiddleware(wrap auth.Middleware) echo.MiddlewareFunc {
 
 func (s *Server) Handler() http.Handler { return s.echo }
 
+func (s *Server) databaseRateLimit(limit int, window time.Duration) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			key := c.RealIP() + "|" + c.Path() + "|" + c.Request().Method
+			digest := sha256.Sum256([]byte(key))
+			windowSeconds := int64(window.Seconds())
+			if windowSeconds < 1 {
+				windowSeconds = 60
+			}
+			var count int
+			err := s.pool.QueryRow(c.Request().Context(), `INSERT INTO public_rate_limits (key_hash,window_started,request_count) VALUES ($1,to_timestamp(floor(extract(epoch from now())/$2)*$2),1) ON CONFLICT (key_hash,window_started) DO UPDATE SET request_count=public_rate_limits.request_count+1 RETURNING request_count`, hex.EncodeToString(digest[:]), windowSeconds).Scan(&count)
+			if err != nil {
+				slog.Error("shared public rate limit unavailable", "error", err)
+				return problem(c, http.StatusServiceUnavailable, "public.rate_limit_unavailable", "Service unavailable", "Public endpoint protection is temporarily unavailable")
+			}
+			if count > limit {
+				_, _ = s.pool.Exec(c.Request().Context(), `INSERT INTO audit_events (action,resource_type,request_id,ip_address,user_agent,metadata) VALUES ('public.rate_limited','public_endpoint',$1,NULLIF($2,'')::inet,$3,jsonb_build_object('path',$4::text,'method',$5::text))`, c.Response().Header().Get(echo.HeaderXRequestID), c.RealIP(), c.Request().UserAgent(), c.Path(), c.Request().Method)
+				return problem(c, http.StatusTooManyRequests, "public.rate_limited", "Too many requests", "Please wait before trying again")
+			}
+			if time.Now().Unix()%600 == 0 {
+				_, _ = s.pool.Exec(c.Request().Context(), `DELETE FROM public_rate_limits WHERE window_started < now()-INTERVAL '2 days'`)
+			}
+			return next(c)
+		}
+	}
+}
+
 func (s *Server) registerRoutes() {
 	// Public Routes
 	s.echo.POST("/api/v1/public/contact", s.submitPublicContact)
 	s.echo.GET("/api/v1/public/check-subdomain", s.checkSubdomainAvailability)
-	s.echo.GET("/api/v1/public/invitation", s.getInvitationByToken)
-	s.echo.GET("/api/v1/auth/invitation", s.getInvitationByToken)
+	s.echo.GET("/api/v1/public/invitation", s.getInvitationByToken, s.publicLimit)
+	s.echo.GET("/api/v1/auth/invitation", s.getInvitationByToken, s.publicLimit)
 
 	s.registerDocs()
 
@@ -210,6 +242,7 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/employees/:employeeId/activate", s.activateEmployee)
 		s.api.GET("/onboarding/settings", s.getOnboardingSettings)
 		s.api.PUT("/onboarding/settings", s.updateOnboardingSettings)
+		s.api.GET("/onboarding/handbook-download-url", s.getOnboardingHandbookDownloadURL)
 		s.api.POST("/onboarding/send-invitation", s.sendOnboardingInvitation)
 		s.api.POST("/leave/requests", s.submitLeaveRequest)
 		s.api.GET("/leave/requests", s.listLeaveRequests)
@@ -226,6 +259,9 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/leave/run-accrual", s.runMonthlyAccrual)
 		s.api.POST("/leave/adjustments", s.createLeaveAdjustment)
 		s.api.POST("/attendance/punches", s.createAttendancePunch)
+		s.api.POST("/timesheets/submit", s.submitTimesheet)
+		s.api.GET("/timesheets", s.listTimesheets)
+		s.api.POST("/timesheets/:id/review", s.reviewTimesheet)
 		s.api.GET("/attendance/punches", s.listAttendancePunches)
 		s.api.GET("/attendance/live", s.getLiveAttendance)
 		s.api.GET("/attendance/activities", s.listAttendanceActivities)
@@ -243,6 +279,10 @@ func (s *Server) registerRoutes() {
 		s.api.PUT("/user/preferences", s.updateUserPreferences)
 		s.api.GET("/signatures", s.listSignatureRequests)
 		s.api.POST("/signatures", s.createSignatureRequestFromTemplate)
+		s.api.GET("/signatures/templates", s.listSignatureTemplates)
+		s.api.GET("/signatures/branding", s.getSignatureTemplateBranding)
+		s.api.POST("/signatures/templates", s.saveSignatureTemplate)
+		s.api.PUT("/signatures/templates/:templateId", s.saveSignatureTemplate)
 		s.api.GET("/signatures/me", s.listMySignatureRequests)
 		s.api.POST("/signatures/:id/sign", s.signSignatureRequest)
 		s.api.POST("/signatures/:id/decline", s.declineSignatureRequest)
@@ -340,14 +380,21 @@ func (s *Server) registerRoutes() {
 		s.api.GET("/permissions", s.listPermissions)
 
 		// Payroll
+		s.api.GET("/payroll/compensation", s.listPayrollCompensation)
+		s.api.POST("/payroll/compensation", s.createPayrollCompensation)
 		s.api.GET("/payroll/configurations", s.listPayrollConfigurations)
 		s.api.POST("/payroll/configurations", s.createPayrollConfiguration)
+		s.api.GET("/payroll/tax-rules", s.listPayrollTaxRules)
+		s.api.POST("/payroll/tax-rules", s.savePayrollTaxRule)
 		s.api.GET("/payroll/periods", s.listPayrollPeriods)
 		s.api.POST("/payroll/periods", s.createPayrollPeriod)
 		s.api.GET("/payroll/periods/:periodId/runs", s.listPayrollRunsForPeriod)
 		s.api.POST("/payroll/periods/:periodId/runs", s.createPayrollRun)
 		s.api.GET("/payroll/runs/:runId/items", s.listPayrollRunItems)
 		s.api.POST("/payroll/runs/:runId/lock", s.lockPayrollRun)
+		s.api.POST("/payroll/runs/:runId/payslips/email", s.emailPayrollPayslips)
+		s.api.GET("/payroll/runs/:runId/payslips", s.listPayrollPayslips)
+		s.api.GET("/payroll/payslips/:paystubId", s.getMyPayslip)
 
 		// Policies
 		s.api.GET("/policies", s.listPolicies)
@@ -373,11 +420,59 @@ func (s *Server) registerRoutes() {
 	s.echo.HEAD("/api/v1/public/assets/*", s.servePublicAsset)
 	s.echo.GET("/api/v1/public/jobs", s.listPublicJobs)
 	s.echo.GET("/api/v1/public/company", s.getPublicCompany)
-	s.echo.POST("/api/v1/public/upload-resume", s.uploadPublicResume)
-	s.echo.POST("/api/v1/messaging/inbound/webhook", s.inboundEmailWebhook)
-	s.echo.POST("/api/inbound", s.inboundEmailWebhook)
-	s.echo.POST("/api/v1/inbound", s.inboundEmailWebhook)
-	s.echo.POST("/api/v1/public/jobs/:postingId/apply", s.applyForJob)
+	s.echo.POST("/api/v1/public/upload-resume", s.uploadPublicResume, s.publicLimit)
+	s.echo.POST("/api/v1/messaging/inbound/webhook", s.inboundEmailWebhook, s.publicLimit)
+	s.echo.POST("/api/inbound", s.inboundEmailWebhook, s.publicLimit)
+	s.echo.POST("/api/v1/inbound", s.inboundEmailWebhook, s.publicLimit)
+	s.echo.POST("/api/v1/public/jobs/:postingId/apply", s.applyForJob, s.publicLimit)
+	s.echo.GET("/api/v1/public/signatures/:token", s.getExternalSignature, s.publicLimit)
+	s.echo.POST("/api/v1/public/signatures/:token/sign", s.signExternalSignature, s.publicLimit)
+}
+
+func (s *Server) getExternalSignature(c echo.Context) error {
+	item, err := s.signatures.GetExternalSignature(c.Request().Context(), c.Param("token"))
+	if errors.Is(err, signatures.ErrRecipientNotFound) {
+		return problem(c, http.StatusNotFound, "signatures.link_invalid", "Link unavailable", "This signing link is invalid, expired, or already used")
+	}
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "signatures.link_failed", "Internal error", "Could not load signing request")
+	}
+	if _, auditErr := s.pool.Exec(c.Request().Context(), `INSERT INTO audit_events (organization_id,action,resource_type,resource_id,request_id,ip_address,user_agent,metadata) VALUES (NULLIF((SELECT organization_id::text FROM signature_requests WHERE id=$1),'')::uuid,'signature.external_link_opened','signature_request',$1,$2,NULLIF($3,'')::inet,$4,jsonb_build_object('recipientHash',$5::text))`, item.RequestID, c.Response().Header().Get(echo.HeaderXRequestID), c.RealIP(), c.Request().UserAgent(), sha256Hex(item.RecipientEmail)); auditErr != nil {
+		slog.Error("external signature open audit failed", "error", auditErr)
+	}
+	if item.DocumentID != "" && s.storage != nil {
+		var org string
+		if e := s.pool.QueryRow(c.Request().Context(), `SELECT organization_id::text FROM signature_requests WHERE id=$1`, item.RequestID).Scan(&org); e == nil {
+			if link, e := s.documents.GetDownloadUrl(c.Request().Context(), org, "", item.DocumentID); e == nil {
+				item.DocumentURL = link.URL
+			}
+		}
+	}
+	return c.JSON(http.StatusOK, item)
+}
+
+func sha256Hex(value string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(value)))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Server) signExternalSignature(c echo.Context) error {
+	var input struct {
+		SignatureType string `json:"signatureType"`
+		SignatureData string `json:"signatureData"`
+		Consent       bool   `json:"consent"`
+	}
+	if err := c.Bind(&input); err != nil || !input.Consent {
+		return problem(c, http.StatusUnprocessableEntity, "signatures.consent_required", "Consent required", "Review the document and confirm before signing")
+	}
+	err := s.signatures.SignExternalRequestWithIdentity(c.Request().Context(), c.Param("token"), input.SignatureType, input.SignatureData, c.RealIP(), c.Request().UserAgent())
+	if errors.Is(err, signatures.ErrRecipientNotFound) {
+		return problem(c, http.StatusNotFound, "signatures.link_invalid", "Link unavailable", "This signing link is invalid, expired, or already used")
+	}
+	if err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "signatures.sign_failed", "Could not sign document", err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]bool{"success": true})
 }
 
 func (s *Server) listDivisions(c echo.Context) error {
@@ -718,6 +813,7 @@ func (s *Server) declineLeaveRequest(c echo.Context) error {
 			return problem(c, http.StatusUnprocessableEntity, "validation.invalid_decline", "Invalid decline", err.Error())
 		}
 	}
+	s.notifyLeaveRequest(c.Request().Context(), principal.OrganizationID, c.Param("requestId"), "declined")
 	return c.JSON(http.StatusOK, result)
 }
 
@@ -1186,6 +1282,7 @@ func (s *Server) approveLeaveRequestHR(c echo.Context) error {
 			return problem(c, http.StatusUnprocessableEntity, "validation.invalid_decision", "Invalid decision", err.Error())
 		}
 	}
+	s.notifyLeaveRequest(c.Request().Context(), principal.OrganizationID, c.Param("requestId"), "approved")
 	return c.JSON(http.StatusOK, result)
 }
 
@@ -1216,6 +1313,7 @@ func (s *Server) approveLeaveRequest(c echo.Context) error {
 			return problem(c, http.StatusUnprocessableEntity, "validation.invalid_decision", "Invalid decision", err.Error())
 		}
 	}
+	s.notifyLeaveRequest(c.Request().Context(), principal.OrganizationID, c.Param("requestId"), "manager approved; awaiting HR review")
 	return c.JSON(http.StatusOK, result)
 }
 
@@ -1569,17 +1667,17 @@ func (s *Server) dispatchInvitationForEmployee(ctx context.Context, organization
 }
 
 type OnboardingSettings struct {
-	WelcomeTitle             string `json:"welcomeTitle"`
-	WelcomeMessage           string `json:"welcomeMessage"`
-	WelcomeVideoURL          string `json:"welcomeVideoUrl"`
-	WelcomeVideoRequired     bool   `json:"welcomeVideoRequired"`
-	RequireBioAndAvatar      bool   `json:"requireBioAndAvatar"`
-	RequireCultureFavorites   bool   `json:"requireCultureFavorites"`
-	RequireDirectDeposit     bool   `json:"requireDirectDeposit"`
-	RequireHandbook          bool   `json:"requireHandbook"`
-	HandbookTitle            string `json:"handbookTitle"`
-	HandbookURL              string `json:"handbookUrl"`
-	HandbookContent          string `json:"handbookContent"`
+	WelcomeTitle            string `json:"welcomeTitle"`
+	WelcomeMessage          string `json:"welcomeMessage"`
+	WelcomeVideoURL         string `json:"welcomeVideoUrl"`
+	WelcomeVideoRequired    bool   `json:"welcomeVideoRequired"`
+	RequireBioAndAvatar     bool   `json:"requireBioAndAvatar"`
+	RequireCultureFavorites bool   `json:"requireCultureFavorites"`
+	RequireDirectDeposit    bool   `json:"requireDirectDeposit"`
+	RequireHandbook         bool   `json:"requireHandbook"`
+	HandbookTitle           string `json:"handbookTitle"`
+	HandbookURL             string `json:"handbookUrl"`
+	HandbookContent         string `json:"handbookContent"`
 }
 
 func (s *Server) getOnboardingSettings(c echo.Context) error {
@@ -1603,23 +1701,45 @@ func (s *Server) getOnboardingSettings(c echo.Context) error {
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		cfg = OnboardingSettings{
-			WelcomeTitle:             "Welcome to the Team",
-			WelcomeMessage:           "We are excited to have you join our team. Let's get your profile set up.",
-			WelcomeVideoURL:          "",
-			WelcomeVideoRequired:     false,
-			RequireBioAndAvatar:      true,
-			RequireCultureFavorites:   true,
-			RequireDirectDeposit:     true,
-			RequireHandbook:          true,
-			HandbookTitle:            "Employee Handbook & Code of Conduct",
-			HandbookURL:              "",
-			HandbookContent:          "Welcome to our organization! As a member of our team, we uphold high standards of integrity, excellence, and mutual respect. Please review and acknowledge our policies.",
+			WelcomeTitle:            "Welcome to the Team",
+			WelcomeMessage:          "We are excited to have you join our team. Let's get your profile set up.",
+			WelcomeVideoURL:         "",
+			WelcomeVideoRequired:    false,
+			RequireBioAndAvatar:     true,
+			RequireCultureFavorites: true,
+			RequireDirectDeposit:    true,
+			RequireHandbook:         true,
+			HandbookTitle:           "Employee Handbook & Code of Conduct",
+			HandbookURL:             "",
+			HandbookContent:         "Welcome to our organization! As a member of our team, we uphold high standards of integrity, excellence, and mutual respect. Please review and acknowledge our policies.",
 		}
 	} else if err != nil {
 		return problem(c, http.StatusInternalServerError, "onboarding.settings_failed", "Internal server error", err.Error())
 	}
 
 	return c.JSON(http.StatusOK, cfg)
+}
+
+func (s *Server) getOnboardingHandbookDownloadURL(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	var handbookRef string
+	if err := s.pool.QueryRow(c.Request().Context(), `SELECT COALESCE(handbook_url, '') FROM organization_onboarding_settings WHERE organization_id = $1`, principal.OrganizationID).Scan(&handbookRef); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return problem(c, http.StatusNotFound, "onboarding.handbook_not_found", "Not found", "No handbook document has been configured")
+		}
+		return problem(c, http.StatusInternalServerError, "onboarding.handbook_failed", "Internal server error", "Could not load handbook")
+	}
+	if !strings.HasPrefix(handbookRef, "document:") {
+		return problem(c, http.StatusNotFound, "onboarding.handbook_not_found", "Not found", "No uploaded handbook document has been configured")
+	}
+	link, err := s.documents.GetDownloadUrl(c.Request().Context(), principal.OrganizationID, principal.UserID, strings.TrimPrefix(handbookRef, "document:"))
+	if err != nil {
+		return problem(c, http.StatusNotFound, "onboarding.handbook_not_found", "Not found", "The configured handbook document is unavailable")
+	}
+	return c.JSON(http.StatusOK, link)
 }
 
 func (s *Server) updateOnboardingSettings(c echo.Context) error {
@@ -1774,10 +1894,10 @@ func (s *Server) checkSetupStatus(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{
-		"hasOrganization": hasOrg,
-		"organizationId":  orgID,
+		"hasOrganization":  hasOrg,
+		"organizationId":   orgID,
 		"organizationName": orgName,
-		"subdomain":       subdomain,
+		"subdomain":        subdomain,
 	})
 }
 
@@ -1906,6 +2026,68 @@ func (s *Server) getLiveAttendance(c echo.Context) error {
 	return c.JSON(http.StatusOK, result)
 }
 
+func (s *Server) submitTimesheet(c echo.Context) error {
+	p, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !p.HasPermission("timesheet:submit_self") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You cannot submit timesheets")
+	}
+	var in struct {
+		WeekStart string `json:"weekStart"`
+		Note      string `json:"note"`
+	}
+	if err := c.Bind(&in); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request", err.Error())
+	}
+	t, err := s.attendance.SubmitTimesheet(c.Request().Context(), p.OrganizationID, p.UserID, in.WeekStart, in.Note)
+	if err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "timesheet.submit_failed", "Could not submit timesheet", err.Error())
+	}
+	return c.JSON(http.StatusCreated, t)
+}
+
+func (s *Server) listTimesheets(c echo.Context) error {
+	p, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !p.HasPermission("timesheet:approve") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You cannot review timesheets")
+	}
+	items, err := s.attendance.ListTimesheets(c.Request().Context(), p.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "timesheet.list_failed", "Internal error", "Could not load timesheets")
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": items})
+}
+
+func (s *Server) reviewTimesheet(c echo.Context) error {
+	p, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !p.HasPermission("timesheet:approve") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You cannot approve timesheets")
+	}
+	var in struct {
+		Decision string `json:"decision"`
+		Note     string `json:"note"`
+	}
+	if err := c.Bind(&in); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request", err.Error())
+	}
+	err := s.attendance.ReviewTimesheet(c.Request().Context(), p.OrganizationID, p.UserID, c.Param("id"), in.Decision, in.Note, c.Response().Header().Get(echo.HeaderXRequestID), c.RealIP(), c.Request().UserAgent())
+	if errors.Is(err, attendance.ErrTimesheetNotFound) {
+		return problem(c, http.StatusConflict, "timesheet.already_reviewed", "Conflict", "Timesheet is no longer awaiting review")
+	}
+	if err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "timesheet.review_failed", "Could not review timesheet", err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
 func (s *Server) getDocumentDownloadUrl(c echo.Context) error {
 	principal, ok := identity.PrincipalFromContext(c.Request().Context())
 	if !ok {
@@ -1935,6 +2117,40 @@ func (s *Server) listPayrollConfigurations(c echo.Context) error {
 		return problem(c, http.StatusInternalServerError, "payroll.list_failed", "Internal server error", "Could not load payroll configurations")
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) listPayrollTaxRules(c echo.Context) error {
+	p, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !p.HasPermission("payroll:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You cannot manage tax rules")
+	}
+	items, err := s.payroll.ListTaxRules(c.Request().Context(), p.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "payroll.tax_rules_failed", "Internal error", "Could not load tax rules")
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": items})
+}
+
+func (s *Server) savePayrollTaxRule(c echo.Context) error {
+	p, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !p.HasPermission("payroll:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You cannot manage tax rules")
+	}
+	var in payroll.TaxRuleInput
+	if err := c.Bind(&in); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request", err.Error())
+	}
+	item, err := s.payroll.SaveTaxRule(c.Request().Context(), p.OrganizationID, in)
+	if err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "payroll.tax_rule_invalid", "Invalid tax rule", err.Error())
+	}
+	return c.JSON(http.StatusOK, item)
 }
 
 func (s *Server) listPayrollPeriods(c echo.Context) error {
@@ -1984,6 +2200,12 @@ func (s *Server) createPayrollRun(c echo.Context) error {
 		if errors.Is(err, payroll.ErrNotFound) {
 			return problem(c, http.StatusNotFound, "payroll.period_not_found", "Not found", "Payroll period not found")
 		}
+		if errors.Is(err, payroll.ErrMissingCompensation) {
+			return problem(c, http.StatusConflict, "payroll.compensation_missing", "Compensation setup incomplete", "Every active employee needs an effective compensation record before payroll can run")
+		}
+		if errors.Is(err, payroll.ErrUnsupportedJurisdiction) {
+			return problem(c, http.StatusUnprocessableEntity, "payroll.rules_unavailable", "Payroll rules unavailable", "Statutory payroll rules are not configured for this jurisdiction")
+		}
 		return problem(c, http.StatusInternalServerError, "payroll.run_failed", "Internal server error", "Could not initiate payroll run")
 	}
 	return c.JSON(http.StatusOK, result)
@@ -2005,6 +2227,108 @@ func (s *Server) lockPayrollRun(c echo.Context) error {
 		return problem(c, http.StatusInternalServerError, "payroll.lock_failed", "Internal server error", "Could not lock payroll run")
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *Server) emailPayrollPayslips(c echo.Context) error {
+	p, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !p.HasPermission("payroll:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You cannot send payslips")
+	}
+	items, err := s.payroll.ListPayslipsForRun(c.Request().Context(), p.OrganizationID, c.Param("runId"))
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "payroll.payslips_failed", "Internal error", "Could not load payslips")
+	}
+	var company, logo, color string
+	_ = s.pool.QueryRow(c.Request().Context(), `SELECT o.name,COALESCE(w.logo_url,''),COALESCE(w.brand_color,'#4F46E5') FROM organizations o LEFT JOIN workspaces w ON w.organization_id=o.id WHERE o.id=$1`, p.OrganizationID).Scan(&company, &logo, &color)
+	var sent, failed int
+	for _, slip := range items {
+		if slip.Email == "" {
+			failed++
+			continue
+		}
+		body := fmt.Sprintf("Your payslip for %s to %s is ready.\nBase pay: %s %d\nEarnings: %d\nDeductions: %d\nNet pay: %d", slip.PeriodStart, slip.PeriodEnd, slip.Currency, slip.BasePay, slip.Earnings, slip.Deductions, slip.NetPay)
+		if err := s.email.SendWorkflowNotice(c.Request().Context(), slip.Email, "Your payslip is ready", "Payslip for "+slip.PeriodStart+" to "+slip.PeriodEnd, body, "View payslip", "https://easyhr.pro/payroll/payslips/"+slip.ID, email.BrandingInfo{CompanyName: company, LogoURL: logo, BrandColor: color}); err != nil {
+			failed++
+			slog.Error("payslip email failed", "payslipId", slip.ID, "error", err)
+			continue
+		}
+		if err := s.payroll.MarkPayslipDelivered(c.Request().Context(), slip.ID); err != nil {
+			failed++
+			continue
+		}
+		sent++
+	}
+	return c.JSON(http.StatusOK, map[string]int{"sent": sent, "failed": failed})
+}
+
+func (s *Server) listPayrollPayslips(c echo.Context) error {
+	p, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !p.HasPermission("payroll:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You cannot view payslips")
+	}
+	items, err := s.payroll.ListPayslipsForRun(c.Request().Context(), p.OrganizationID, c.Param("runId"))
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "payroll.payslips_failed", "Internal error", "Could not load payslips")
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": items})
+}
+
+func (s *Server) getMyPayslip(c echo.Context) error {
+	p, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	slip, err := s.payroll.GetPayslipForUser(c.Request().Context(), p.OrganizationID, p.UserID, c.Param("paystubId"))
+	if err != nil {
+		return problem(c, http.StatusNotFound, "payroll.payslip_not_found", "Not found", "Payslip unavailable")
+	}
+	return c.JSON(http.StatusOK, slip)
+}
+
+func (s *Server) listPayrollCompensation(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !principal.HasPermission("payroll:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view payroll compensation")
+	}
+	result, err := payroll.ListCompensation(c.Request().Context(), s.pool, principal.OrganizationID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "payroll.compensation_list_failed", "Internal server error", "Could not load employee compensation")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) createPayrollCompensation(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	if !principal.HasPermission("payroll:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage payroll compensation")
+	}
+	var input payroll.CreateCompensationInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request", err.Error())
+	}
+	result, err := s.payroll.CreateCompensation(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Response().Header().Get(echo.HeaderXRequestID), input)
+	if errors.Is(err, payroll.ErrCompensationConfigMissing) {
+		return problem(c, http.StatusConflict, "payroll.configuration_required", "Payroll settings required", err.Error())
+	}
+	if errors.Is(err, payroll.ErrCompensationEmployeeNotFound) {
+		return problem(c, http.StatusNotFound, "payroll.employee_not_found", "Not found", "Select an active employee in this company")
+	}
+	if err != nil {
+		return problem(c, http.StatusUnprocessableEntity, "payroll.compensation_invalid", "Invalid compensation", err.Error())
+	}
+	return c.JSON(http.StatusCreated, result)
 }
 
 func (s *Server) createPayrollConfiguration(c echo.Context) error {
@@ -2056,7 +2380,6 @@ func (s *Server) listPayrollRunItems(c echo.Context) error {
 	return c.JSON(http.StatusOK, result)
 }
 
-
 func (s *Server) createSignatureRequest(c echo.Context) error {
 	principal, ok := identity.PrincipalFromContext(c.Request().Context())
 	if !ok {
@@ -2070,13 +2393,16 @@ func (s *Server) createSignatureRequest(c echo.Context) error {
 	if err := c.Bind(&input); err != nil {
 		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request", err.Error())
 	}
-	result, err := s.signatures.CreateRequest(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Param("documentId"), input)
+	result, links, err := s.signatures.CreateDocumentRequest(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Param("documentId"), input)
 	if err != nil {
 		if errors.Is(err, signatures.ErrNotFound) {
 			return problem(c, http.StatusNotFound, "signatures.document_not_found", "Not found", "Document not found or unavailable")
 		}
-		return problem(c, http.StatusInternalServerError, "signatures.create_failed", "Internal server error", "Could not dispatch signature request")
+		return problem(c, http.StatusUnprocessableEntity, "signatures.create_failed", "Invalid signature request", err.Error())
 	}
+	var documentTitle string
+	_ = s.pool.QueryRow(c.Request().Context(), `SELECT filename FROM documents WHERE id=$1 AND organization_id=$2`, c.Param("documentId"), principal.OrganizationID).Scan(&documentTitle)
+	s.notifySignatureRecipientsWithLinks(c.Request().Context(), principal.OrganizationID, input.Recipients, links, documentTitle, input.Message)
 	return c.JSON(http.StatusOK, result)
 }
 
@@ -2223,6 +2549,13 @@ func (s *Server) uploadPublicResume(c echo.Context) error {
 	if err != nil {
 		return problem(c, http.StatusBadRequest, "upload.missing_file", "Missing file", "Please select a resume or CV file to upload")
 	}
+	if file.Size <= 0 || file.Size > 10*1024*1024 {
+		return problem(c, http.StatusRequestEntityTooLarge, "upload.invalid_size", "Invalid file size", "Resume files must be between 1 byte and 10 MB")
+	}
+	ext := strings.ToLower(path.Ext(file.Filename))
+	if ext != ".pdf" && ext != ".doc" && ext != ".docx" {
+		return problem(c, http.StatusUnsupportedMediaType, "upload.invalid_type", "Unsupported file type", "Upload a PDF, DOC, or DOCX resume")
+	}
 
 	src, err := file.Open()
 	if err != nil {
@@ -2235,19 +2568,20 @@ func (s *Server) uploadPublicResume(c echo.Context) error {
 		return problem(c, http.StatusInternalServerError, "upload.read_failed", "Upload failed", err.Error())
 	}
 
-	contentType := file.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = http.DetectContentType(buf)
+	contentType := http.DetectContentType(buf)
+	if (ext == ".pdf" && contentType != "application/pdf") || (ext != ".pdf" && contentType != "application/msword" && contentType != "application/vnd.openxmlformats-officedocument.wordprocessingml.document" && contentType != "application/zip" && contentType != "application/octet-stream") {
+		return problem(c, http.StatusUnsupportedMediaType, "upload.invalid_content", "Invalid file content", "The uploaded content does not match a supported resume format")
 	}
-
-	ext := strings.TrimPrefix(path.Ext(file.Filename), ".")
-	if ext == "" {
-		ext = "pdf"
+	if s.storage == nil {
+		return problem(c, http.StatusServiceUnavailable, "upload.storage_unavailable", "Upload unavailable", "Resume storage is not configured")
 	}
-
-	key := fmt.Sprintf("resumes/public_%d_%s", time.Now().UnixNano(), file.Filename)
-	if s.storage != nil {
-		_ = s.storage.PutObject(c.Request().Context(), key, contentType, bytes.NewReader(buf), int64(len(buf)))
+	key := fmt.Sprintf("resumes/public_%d%s", time.Now().UnixNano(), ext)
+	if err := s.storage.PutObject(c.Request().Context(), key, contentType, bytes.NewReader(buf), int64(len(buf))); err != nil {
+		slog.Error("public resume storage failed", "requestId", c.Response().Header().Get(echo.HeaderXRequestID), "error", err)
+		return problem(c, http.StatusInternalServerError, "upload.storage_failed", "Upload failed", "The resume could not be stored")
+	}
+	if _, auditErr := s.pool.Exec(c.Request().Context(), `INSERT INTO audit_events (action, resource_type, request_id, ip_address, user_agent, metadata) VALUES ('career.resume_uploaded', 'resume_upload', $1, NULLIF($2, '')::inet, $3, jsonb_build_object('sizeBytes', $4::bigint, 'extension', $5::text))`, c.Response().Header().Get(echo.HeaderXRequestID), c.RealIP(), c.Request().UserAgent(), len(buf), ext); auditErr != nil {
+		slog.Error("public resume upload audit failed", "error", auditErr)
 	}
 
 	publicURL := s.buildPublicAssetURL(c, key)
@@ -2271,6 +2605,9 @@ func (s *Server) applyForJob(c echo.Context) error {
 		}
 		slog.Error("failed to apply for job", "error", err, "postingId", c.Param("postingId"))
 		return problem(c, http.StatusInternalServerError, "hiring.apply_failed", "Internal server error", err.Error())
+	}
+	if _, auditErr := s.pool.Exec(c.Request().Context(), `INSERT INTO audit_events (organization_id, actor_user_id, action, resource_type, resource_id, request_id, ip_address, user_agent, metadata) SELECT jp.organization_id, NULL, 'career.application_submitted', 'job_applicant', $1::uuid, $2, NULLIF($4, '')::inet, $5, jsonb_build_object('postingId', $3::text) FROM job_postings jp WHERE jp.id = $3::uuid`, result.ID, c.Response().Header().Get(echo.HeaderXRequestID), c.Param("postingId"), c.RealIP(), c.Request().UserAgent()); auditErr != nil {
+		slog.Error("career application audit failed", "requestId", c.Response().Header().Get(echo.HeaderXRequestID), "error", auditErr)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -3456,7 +3793,6 @@ func (s *Server) updateTenantTicketStatus(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-
 // Platform Support
 func (s *Server) listPlatformTickets(c echo.Context) error {
 	_, ok := PlatformPrincipalFromContext(c.Request().Context())
@@ -3678,7 +4014,6 @@ func (s *Server) listPermissions(c echo.Context) error {
 	return c.JSON(http.StatusOK, result)
 }
 
-
 // Platform Audit
 func (s *Server) listPlatformAuditLogs(c echo.Context) error {
 	_, ok := PlatformPrincipalFromContext(c.Request().Context())
@@ -3848,6 +4183,12 @@ func (s *Server) inboundEmailWebhook(c echo.Context) error {
 	if err != nil {
 		return problem(c, http.StatusBadRequest, "inbound.read_body_failed", "Failed to read body", err.Error())
 	}
+	if !verifyResendWebhook(os.Getenv("RESEND_WEBHOOK_SECRET"), c.Request().Header.Get("svix-id"), c.Request().Header.Get("svix-timestamp"), c.Request().Header.Get("svix-signature"), rawBytes, time.Now()) {
+		if _, auditErr := s.pool.Exec(c.Request().Context(), `INSERT INTO audit_events (action,resource_type,request_id,ip_address,user_agent,metadata) VALUES ('inbound_webhook.signature_rejected','inbound_email',$1,NULLIF($2,'')::inet,$3,jsonb_build_object('provider','resend','payloadBytes',$4::bigint))`, c.Response().Header().Get(echo.HeaderXRequestID), c.RealIP(), c.Request().UserAgent(), len(rawBytes)); auditErr != nil {
+			slog.Error("inbound webhook rejection audit failed", "error", auditErr)
+		}
+		return problem(c, http.StatusUnauthorized, "inbound.signature_invalid", "Webhook signature invalid", "The inbound email webhook signature could not be verified")
+	}
 
 	// 1. Try parsing as Resend Webhook event (type: "email.received")
 	var resendEvent struct {
@@ -3864,6 +4205,9 @@ func (s *Server) inboundEmailWebhook(c echo.Context) error {
 	}
 
 	if err := json.Unmarshal(rawBytes, &resendEvent); err == nil && resendEvent.Type == "email.received" && resendEvent.Data.EmailID != "" {
+		if _, auditErr := s.pool.Exec(c.Request().Context(), `INSERT INTO audit_events (action, resource_type, request_id, ip_address, user_agent, metadata) VALUES ('inbound_webhook.received', 'inbound_email', $1, NULLIF($2, '')::inet, $3, jsonb_build_object('provider', 'resend', 'emailId', $4))`, c.Response().Header().Get(echo.HeaderXRequestID), c.RealIP(), c.Request().UserAgent(), resendEvent.Data.EmailID); auditErr != nil {
+			slog.Error("inbound email audit event failed", "error", auditErr)
+		}
 		slog.Info("processing resend inbound email webhook", "email_id", resendEvent.Data.EmailID, "from", resendEvent.Data.From, "subject", resendEvent.Data.Subject)
 
 		// Fetch full email content from Resend Receiving API
@@ -4098,9 +4442,9 @@ func (s *Server) getInvitationByToken(c echo.Context) error {
 	}
 
 	var (
-		id, orgID, email, name, role, status string
-		empID                                *string
-		expiresAt                            time.Time
+		id, orgID, email, name, role, status    string
+		empID                                   *string
+		expiresAt                               time.Time
 		orgName, subdomain, brandColor, logoURL string
 	)
 
@@ -4111,6 +4455,9 @@ func (s *Server) getInvitationByToken(c echo.Context) error {
 		JOIN organizations o ON o.id = i.organization_id
 		LEFT JOIN workspaces w ON w.organization_id = o.id
 		WHERE i.token = $1`, token).Scan(&id, &orgID, &empID, &email, &name, &role, &status, &expiresAt, &orgName, &subdomain, &brandColor, &logoURL)
+	if _, auditErr := s.pool.Exec(c.Request().Context(), `INSERT INTO audit_events (organization_id, action, resource_type, resource_id, request_id, ip_address, user_agent, metadata) VALUES (NULLIF($1, '')::uuid, 'public.invitation_lookup', 'invitation', NULLIF($2, '')::uuid, $3, NULLIF($4, '')::inet, $5, jsonb_build_object('found', $6::boolean))`, orgID, id, c.Response().Header().Get(echo.HeaderXRequestID), c.RealIP(), c.Request().UserAgent(), err == nil); auditErr != nil {
+		slog.Error("public invitation lookup audit failed", "error", auditErr)
+	}
 
 	if err != nil {
 		return c.JSON(http.StatusOK, InvitationResponse{
@@ -4162,4 +4509,3 @@ func (s *Server) getInvitationByToken(c echo.Context) error {
 		LogoURL:          logoURL,
 	})
 }
-

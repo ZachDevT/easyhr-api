@@ -6,18 +6,12 @@ import (
 )
 
 var (
-	ErrNotFound      = errors.New("signature request not found")
-	ErrProviderError = errors.New("electronic signature provider error")
+	ErrNotFound          = errors.New("signature request not found")
+	ErrRecipientNotFound = errors.New("signature recipient not found or request is no longer pending")
 )
 
 type Service struct {
-	pool     *pgxpool.Pool
-	provider Provider
+	pool *pgxpool.Pool
 }
 
-func NewService(pool *pgxpool.Pool, provider Provider) *Service {
-	return &Service{
-		pool:     pool,
-		provider: provider,
-	}
-}
+func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool} }

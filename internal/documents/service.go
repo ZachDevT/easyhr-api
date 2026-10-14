@@ -3,9 +3,11 @@ package documents
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"time"
@@ -100,9 +102,6 @@ func (input CreateUploadIntentInput) Validate() error {
 	if name := strings.TrimSpace(input.Filename); name == "" || len(name) > 255 {
 		return fmt.Errorf("filename must contain between 1 and 255 characters")
 	}
-	if input.EmployeeID == "" {
-		return fmt.Errorf("employeeId is required")
-	}
 	if contentType := strings.TrimSpace(input.ContentType); contentType == "" || len(contentType) > 120 || !strings.Contains(contentType, "/") {
 		return fmt.Errorf("contentType must be a valid MIME type")
 	}
@@ -132,12 +131,14 @@ func (service *Service) CreateUploadIntent(ctx context.Context, organizationID, 
 		return UploadIntent{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var employeeExists bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM employees WHERE id = $1 AND organization_id = $2)`, input.EmployeeID, organizationID).Scan(&employeeExists); err != nil {
-		return UploadIntent{}, err
-	}
-	if !employeeExists {
-		return UploadIntent{}, ErrDocumentNotFound
+	if input.EmployeeID != "" {
+		var employeeExists bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM employees WHERE id = $1 AND organization_id = $2)`, input.EmployeeID, organizationID).Scan(&employeeExists); err != nil {
+			return UploadIntent{}, err
+		}
+		if !employeeExists {
+			return UploadIntent{}, ErrDocumentNotFound
+		}
 	}
 	keySuffix, err := randomObjectKeySuffix()
 	if err != nil {
@@ -148,7 +149,7 @@ func (service *Service) CreateUploadIntent(ctx context.Context, organizationID, 
 	result := UploadIntent{ExpiresAt: expiresAt.Format(time.RFC3339)}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO documents (organization_id, employee_id, filename, category, content_type, size_bytes, object_key, upload_expires_at, expires_on, created_by_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, '')::date, $10)
+		VALUES ($1, NULLIF($2, '')::uuid, $3, $4, $5, $6, $7, $8, NULLIF($9, '')::date, $10)
 		RETURNING id::text, employee_id::text, filename, category, status, expires_on::text, created_at::text`,
 		organizationID, input.EmployeeID, strings.TrimSpace(input.Filename), input.Category, strings.TrimSpace(input.ContentType), input.SizeBytes, objectKey, expiresAt, input.ExpiresOn, actorUserID).
 		Scan(&result.Document.ID, &result.Document.EmployeeID, &result.Document.Filename, &result.Document.Category, &result.Document.Status, &result.Document.ExpiresOn, &result.Document.CreatedAt)
@@ -169,8 +170,11 @@ func (service *Service) CreateUploadIntent(ctx context.Context, organizationID, 
 }
 
 func (service *Service) CompleteUpload(ctx context.Context, organizationID, actorUserID, documentID, checksum string) (Document, error) {
-	if checksum == "" || !sha256Pattern.MatchString(checksum) {
-		checksum = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	if service.storage == nil {
+		return Document{}, fmt.Errorf("document storage is not configured")
+	}
+	if !sha256Pattern.MatchString(checksum) {
+		return Document{}, fmt.Errorf("checksumSha256 must be a SHA-256 hex digest")
 	}
 	tx, err := service.pool.Begin(ctx)
 	if err != nil {
@@ -188,8 +192,27 @@ func (service *Service) CompleteUpload(ctx context.Context, organizationID, acto
 	if err != nil {
 		return Document{}, err
 	}
-	if result.Status != "pending_upload" && result.Status != "pending_scan" && time.Now().UTC().After(expiresAt) {
+	if result.Status != "pending_upload" && result.Status != "pending_scan" {
 		return Document{}, ErrDocumentNotCompletable
+	}
+	if time.Now().UTC().After(expiresAt) {
+		return Document{}, ErrDocumentNotCompletable
+	}
+	body, _, actualSize, err := service.storage.GetObject(ctx, objectKey)
+	if err != nil {
+		return Document{}, fmt.Errorf("uploaded document is not available in storage: %w", err)
+	}
+	defer body.Close()
+	if actualSize != sizeBytes {
+		return Document{}, fmt.Errorf("uploaded document size does not match upload intent")
+	}
+	digest := sha256.New()
+	if _, err = io.Copy(digest, body); err != nil {
+		return Document{}, fmt.Errorf("read uploaded document for verification: %w", err)
+	}
+	actualChecksum := hex.EncodeToString(digest.Sum(nil))
+	if !strings.EqualFold(actualChecksum, checksum) {
+		return Document{}, fmt.Errorf("uploaded document checksum does not match")
 	}
 	if _, err = tx.Exec(ctx, `UPDATE documents SET status = 'available', sha256 = lower($2) WHERE id = $1`, documentID, checksum); err != nil {
 		return Document{}, err

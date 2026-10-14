@@ -2,6 +2,8 @@ package benefits
 
 import (
 	"context"
+	"fmt"
+	"strings"
 )
 
 type BenefitPlan struct {
@@ -26,17 +28,9 @@ type CreatePlanInput struct {
 }
 
 func (service *Service) ListPlans(ctx context.Context, organizationID string) ([]BenefitPlan, error) {
-	// Check if plans exist; if not, seed default starter plans for the organization
-	var count int
-	_ = service.pool.QueryRow(ctx, `SELECT count(*) FROM benefit_plans WHERE organization_id = $1`, organizationID).Scan(&count)
-	if count == 0 {
-		_ = service.seedDefaultPlans(ctx, organizationID)
-	}
-
 	var eligibleCount int
-	_ = service.pool.QueryRow(ctx, `SELECT count(*) FROM employees WHERE organization_id = $1`, organizationID).Scan(&eligibleCount)
-	if eligibleCount == 0 {
-		eligibleCount = 1
+	if err := service.pool.QueryRow(ctx, `SELECT count(*) FROM employees WHERE organization_id = $1`, organizationID).Scan(&eligibleCount); err != nil {
+		return nil, err
 	}
 
 	rows, err := service.pool.Query(ctx, `
@@ -76,35 +70,20 @@ func (service *Service) ListPlans(ctx context.Context, organizationID string) ([
 	return items, nil
 }
 
-func (service *Service) seedDefaultPlans(ctx context.Context, organizationID string) error {
-	defaults := []struct {
-		name     string
-		category string
-		desc     string
-		employer int64
-		employee int64
-	}{
-		{"Health & Medical Insurance", "health", "Comprehensive medical, dental, and hospitalization care.", 45000, 5000},
-		{"401(k) / Retirement Pension", "retirement", "Company matches up to 4% of employee retirement savings.", 20000, 20000},
-		{"Meal & Wellness Allowance", "allowance", "Monthly stipend for nutritious meals, fitness, and wellness.", 15000, 0},
-		{"Group Life & Accident Insurance", "health", "Company-paid policy covering 2x annual base compensation.", 5000, 0},
-	}
-
-	for _, d := range defaults {
-		_, _ = service.pool.Exec(ctx, `
-			INSERT INTO benefit_plans (organization_id, name, category, description, employer_cost_minor, employee_cost_minor, currency)
-			VALUES ($1, $2, $3, $4, $5, $6, 'USD')
-		`, organizationID, d.name, d.category, d.desc, d.employer, d.employee)
-	}
-	return nil
-}
-
 func (service *Service) CreatePlan(ctx context.Context, organizationID, actorUserID string, input CreatePlanInput) (BenefitPlan, error) {
-	if input.Currency == "" {
-		input.Currency = "USD"
-	}
+	input.Name = strings.TrimSpace(input.Name)
+	input.Currency = strings.ToUpper(strings.TrimSpace(input.Currency))
 	if input.Category == "" {
 		input.Category = "other"
+	}
+	if input.Name == "" || len(input.Name) > 255 {
+		return BenefitPlan{}, fmt.Errorf("name must contain between 1 and 255 characters")
+	}
+	if len(input.Currency) != 3 {
+		return BenefitPlan{}, fmt.Errorf("currency must be a three-letter code")
+	}
+	if input.EmployerCostMinor < 0 || input.EmployeeCostMinor < 0 {
+		return BenefitPlan{}, fmt.Errorf("benefit costs cannot be negative")
 	}
 
 	var item BenefitPlan

@@ -12,6 +12,9 @@ type DownloadUrl struct {
 }
 
 func (service *Service) GetDownloadUrl(ctx context.Context, organizationID, actorUserID, documentID string) (DownloadUrl, error) {
+	if service.storage == nil {
+		return DownloadUrl{}, fmt.Errorf("document storage is not configured")
+	}
 	var objectKey string
 	var status string
 	err := service.pool.QueryRow(ctx, `SELECT object_key, status FROM documents WHERE id = $1 AND organization_id = $2`, documentID, organizationID).Scan(&objectKey, &status)

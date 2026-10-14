@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -154,8 +155,11 @@ func (s *Service) sendViaResendWithHeaders(ctx context.Context, toEmail, subject
 		}
 	}
 
-	log.Printf("[Email Warning] Resend status %d: %s. Handled gracefully.", statusCode, respStr)
-	return "", nil
+	log.Printf("[Email Warning] Resend status %d: %s.", statusCode, respStr)
+	if err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("email provider returned status %d", statusCode)
 }
 
 // RetrieveReceivedEmail fetches full email body, headers, and metadata from the Resend Receiving API.
@@ -503,6 +507,29 @@ func (s *Service) SendJobOfferNotification(ctx context.Context, toEmail, candida
 // SendRaw sends an arbitrary HTML email. Implements messaging.EmailSender.
 func (s *Service) SendRaw(ctx context.Context, toEmail, subject, htmlBody string) error {
 	return s.sendViaResend(ctx, toEmail, subject, htmlBody)
+}
+
+// SendWorkflowNotice sends a small branded transactional notice for HR actions.
+// The body and link label are treated as text; callers cannot inject HTML.
+func (s *Service) SendWorkflowNotice(ctx context.Context, toEmail, subject, heading, body, actionLabel, actionURL string, branding BrandingInfo) error {
+	company := strings.TrimSpace(branding.CompanyName)
+	if company == "" {
+		company = "Your organization"
+	}
+	color := strings.TrimSpace(branding.BrandColor)
+	if len(color) != 7 || !strings.HasPrefix(color, "#") {
+		color = "#4F46E5"
+	}
+	logo := "<strong style=\"font-size:20px;color:white\">" + html.EscapeString(company) + "</strong>"
+	if branding.LogoURL != "" {
+		logo = fmt.Sprintf("<img src=\"%s\" alt=\"%s\" style=\"max-height:42px;max-width:180px\">", html.EscapeString(branding.LogoURL), html.EscapeString(company))
+	}
+	action := ""
+	if actionLabel != "" && actionURL != "" {
+		action = fmt.Sprintf(`<p style="margin:28px 0"><a href="%s" style="background:%s;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:700">%s</a></p>`, html.EscapeString(actionURL), color, html.EscapeString(actionLabel))
+	}
+	bodyHTML := fmt.Sprintf(`<!doctype html><html><body style="margin:0;background:#f4f5f9;font-family:Arial,sans-serif;color:#172033"><main style="max-width:600px;margin:32px auto;background:#fff;border-radius:14px;overflow:hidden"><header style="background:%s;padding:24px 30px">%s</header><section style="padding:30px"><h1 style="font-size:22px">%s</h1><p style="line-height:1.6;color:#475467">%s</p>%s<p style="font-size:13px;color:#667085">%s</p></section></main></body></html>`, color, logo, html.EscapeString(heading), html.EscapeString(body), action, html.EscapeString(company))
+	return s.sendViaResend(ctx, toEmail, subject, bodyHTML)
 }
 
 // SendRawWithHeaders sends an arbitrary HTML email with custom headers (e.g. In-Reply-To, References) and returns the Resend ID.

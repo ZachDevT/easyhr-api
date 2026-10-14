@@ -1,0 +1,9 @@
+ALTER TABLE signature_templates ADD COLUMN IF NOT EXISTS header_text TEXT NOT NULL DEFAULT '';
+ALTER TABLE signature_templates ADD COLUMN IF NOT EXISTS footer_text TEXT NOT NULL DEFAULT '';
+ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS header_rendered TEXT NOT NULL DEFAULT '';
+ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS footer_rendered TEXT NOT NULL DEFAULT '';
+ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS brand_color TEXT NOT NULL DEFAULT '#4F46E5';
+ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS logo_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS website_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS contact_phone TEXT NOT NULL DEFAULT '';
+ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS contact_email TEXT NOT NULL DEFAULT '';

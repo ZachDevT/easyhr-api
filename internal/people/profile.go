@@ -11,35 +11,36 @@ import (
 var ErrEmployeeNotFound = errors.New("employee not found")
 
 type PersonalProfile struct {
-	FirstName                  *string `json:"firstName,omitempty"`
-	LastName                   *string `json:"lastName,omitempty"`
-	PersonalEmail              *string `json:"personalEmail"`
-	PersonalPhone              *string `json:"personalPhone"`
-	BirthDate                  *string `json:"birthDate"`
-	Bio                        *string `json:"bio"`
-	AvatarURL                  *string `json:"avatarUrl"`
-	ShirtSize                  *string `json:"shirtSize"`
-	FavoriteFood               *string `json:"favoriteFood"`
-	FavoriteMovies             *string `json:"favoriteMovies"`
-	FavoriteMusic              *string `json:"favoriteMusic"`
-	CoffeeTea                  *string `json:"coffeeTea"`
-	FunFact                    *string `json:"funFact"`
-	AddressLine1               *string `json:"addressLine1"`
-	AddressLine2               *string `json:"addressLine2"`
-	City                       *string `json:"city"`
-	AdministrativeArea         *string `json:"administrativeArea"`
-	PostalCode                 *string `json:"postalCode"`
-	EmergencyContactName       *string `json:"emergencyContactName"`
+	FirstName                    *string `json:"firstName,omitempty"`
+	LastName                     *string `json:"lastName,omitempty"`
+	PersonalEmail                *string `json:"personalEmail"`
+	PersonalPhone                *string `json:"personalPhone"`
+	BirthDate                    *string `json:"birthDate"`
+	Bio                          *string `json:"bio"`
+	AvatarURL                    *string `json:"avatarUrl"`
+	ShirtSize                    *string `json:"shirtSize"`
+	FavoriteFood                 *string `json:"favoriteFood"`
+	FavoriteMovies               *string `json:"favoriteMovies"`
+	FavoriteMusic                *string `json:"favoriteMusic"`
+	CoffeeTea                    *string `json:"coffeeTea"`
+	FunFact                      *string `json:"funFact"`
+	AddressLine1                 *string `json:"addressLine1"`
+	AddressLine2                 *string `json:"addressLine2"`
+	City                         *string `json:"city"`
+	AdministrativeArea           *string `json:"administrativeArea"`
+	PostalCode                   *string `json:"postalCode"`
+	EmergencyContactName         *string `json:"emergencyContactName"`
 	EmergencyContactRelationship *string `json:"emergencyContactRelationship"`
-	EmergencyContactPhone      *string `json:"emergencyContactPhone"`
-	PaymentMethod              *string `json:"paymentMethod"`
-	BankName                   *string `json:"bankName"`
-	BankRoutingNumber          *string `json:"bankRoutingNumber"`
-	BankAccountNumber          *string `json:"bankAccountNumber"`
-	MobileMoneyProvider        *string `json:"mobileMoneyProvider"`
-	MobileMoneyPhone           *string `json:"mobileMoneyPhone"`
-	WalletEmail                *string `json:"walletEmail"`
-	HandbookSignedAt           *string `json:"handbookSignedAt"`
+	EmergencyContactPhone        *string `json:"emergencyContactPhone"`
+	PaymentMethod                *string `json:"paymentMethod"`
+	BankName                     *string `json:"bankName"`
+	BankRoutingNumber            *string `json:"bankRoutingNumber"`
+	BankAccountNumber            *string `json:"bankAccountNumber"`
+	MobileMoneyProvider          *string `json:"mobileMoneyProvider"`
+	MobileMoneyPhone             *string `json:"mobileMoneyPhone"`
+	WalletEmail                  *string `json:"walletEmail"`
+	HandbookSignedAt             *string `json:"handbookSignedAt"`
+	HandbookSignatureName        *string `json:"handbookSignatureName"`
 }
 
 type EmployeeProfile struct {
@@ -66,31 +67,32 @@ type EmployeeProfile struct {
 	UpdatedAt      string  `json:"updatedAt"`
 
 	// Personal profile & onboarding details
-	BirthDate                  *string `json:"birthDate"`
-	Bio                        *string `json:"bio"`
-	AvatarURL                  *string `json:"avatarUrl"`
-	ShirtSize                  *string `json:"shirtSize"`
-	FavoriteFood               *string `json:"favoriteFood"`
-	FavoriteMovies             *string `json:"favoriteMovies"`
-	FavoriteMusic              *string `json:"favoriteMusic"`
-	CoffeeTea                  *string `json:"coffeeTea"`
-	FunFact                    *string `json:"funFact"`
-	AddressLine1               *string `json:"addressLine1"`
-	AddressLine2               *string `json:"addressLine2"`
-	City                       *string `json:"city"`
-	AdministrativeArea         *string `json:"administrativeArea"`
-	PostalCode                 *string `json:"postalCode"`
-	EmergencyContactName       *string `json:"emergencyContactName"`
+	BirthDate                    *string `json:"birthDate"`
+	Bio                          *string `json:"bio"`
+	AvatarURL                    *string `json:"avatarUrl"`
+	ShirtSize                    *string `json:"shirtSize"`
+	FavoriteFood                 *string `json:"favoriteFood"`
+	FavoriteMovies               *string `json:"favoriteMovies"`
+	FavoriteMusic                *string `json:"favoriteMusic"`
+	CoffeeTea                    *string `json:"coffeeTea"`
+	FunFact                      *string `json:"funFact"`
+	AddressLine1                 *string `json:"addressLine1"`
+	AddressLine2                 *string `json:"addressLine2"`
+	City                         *string `json:"city"`
+	AdministrativeArea           *string `json:"administrativeArea"`
+	PostalCode                   *string `json:"postalCode"`
+	EmergencyContactName         *string `json:"emergencyContactName"`
 	EmergencyContactRelationship *string `json:"emergencyContactRelationship"`
-	EmergencyContactPhone      *string `json:"emergencyContactPhone"`
-	PaymentMethod              *string `json:"paymentMethod"`
-	BankName                   *string `json:"bankName"`
-	BankRoutingNumber          *string `json:"bankRoutingNumber"`
-	BankAccountNumber          *string `json:"bankAccountNumber"`
-	MobileMoneyProvider        *string `json:"mobileMoneyProvider"`
-	MobileMoneyPhone           *string `json:"mobileMoneyPhone"`
-	WalletEmail                *string `json:"walletEmail"`
-	HandbookSignedAt           *string `json:"handbookSignedAt"`
+	EmergencyContactPhone        *string `json:"emergencyContactPhone"`
+	PaymentMethod                *string `json:"paymentMethod"`
+	BankName                     *string `json:"bankName"`
+	BankRoutingNumber            *string `json:"bankRoutingNumber"`
+	BankAccountNumber            *string `json:"bankAccountNumber"`
+	MobileMoneyProvider          *string `json:"mobileMoneyProvider"`
+	MobileMoneyPhone             *string `json:"mobileMoneyPhone"`
+	WalletEmail                  *string `json:"walletEmail"`
+	HandbookSignedAt             *string `json:"handbookSignedAt"`
+	HandbookSignatureName        *string `json:"handbookSignatureName"`
 }
 
 const employeeProfileSelectSQL = `
@@ -132,6 +134,7 @@ const employeeProfileSelectSQL = `
 		profile.mobile_money_phone,
 		profile.wallet_email,
 		profile.handbook_signed_at::text,
+		profile.handbook_signature_name,
 		profile.birth_date::text,
 		profile.bio,
 		profile.avatar_url,
@@ -159,26 +162,26 @@ const employeeProfileSelectSQL = `
 func (directory *Directory) scanEmployeeProfile(row pgx.Row) (EmployeeProfile, error) {
 	var result EmployeeProfile
 	err := row.Scan(
-		&result.ID, 
+		&result.ID,
 		&result.EmployeeNumber,
-		&result.FirstName, 
-		&result.LastName, 
-		&result.WorkEmail, 
-		&result.PersonalEmail, 
+		&result.FirstName,
+		&result.LastName,
+		&result.WorkEmail,
+		&result.PersonalEmail,
 		&result.PersonalPhone,
-		&result.Status, 
-		&result.DepartmentID, 
+		&result.Status,
+		&result.DepartmentID,
 		&result.Department,
-		&result.DivisionID, 
+		&result.DivisionID,
 		&result.Division,
-		&result.LocationID, 
+		&result.LocationID,
 		&result.Location,
-		&result.ManagerID, 
+		&result.ManagerID,
 		&result.Manager,
-		&result.JobTitle, 
-		&result.StartDate, 
+		&result.JobTitle,
+		&result.StartDate,
 		&result.Avatar,
-		&result.CreatedAt, 
+		&result.CreatedAt,
 		&result.UpdatedAt,
 		&result.AddressLine1,
 		&result.AddressLine2,
@@ -196,6 +199,7 @@ func (directory *Directory) scanEmployeeProfile(row pgx.Row) (EmployeeProfile, e
 		&result.MobileMoneyPhone,
 		&result.WalletEmail,
 		&result.HandbookSignedAt,
+		&result.HandbookSignatureName,
 		&result.BirthDate,
 		&result.Bio,
 		&result.AvatarURL,
@@ -257,7 +261,7 @@ func (directory *Directory) UpdatePersonalProfile(ctx context.Context, organizat
 			emergency_contact_name, emergency_contact_relationship, emergency_contact_phone,
 			payment_method, bank_name, bank_routing_number, bank_account_number,
 			mobile_money_provider, mobile_money_phone, wallet_email,
-			handbook_signed_at,
+			handbook_signed_at, handbook_signature_name,
 			birth_date, bio, avatar_url, shirt_size, favorite_food, favorite_movies, favorite_music, coffee_tea, fun_fact,
 			updated_at
 		) VALUES (
@@ -266,9 +270,9 @@ func (directory *Directory) UpdatePersonalProfile(ctx context.Context, organizat
 			$9, $10, $11,
 			$12, $13, $14, $15,
 			$16, $17, $18,
-			CASE WHEN $19::text IS NOT NULL AND $19::text != '' THEN now() ELSE NULL END,
-			CASE WHEN $20::text IS NOT NULL AND $20::text != '' THEN $20::date ELSE NULL END,
-			$21, $22, $23, $24, $25, $26, $27, $28,
+			CASE WHEN $19::text IS NOT NULL AND $19::text != '' THEN now() ELSE NULL END, $20,
+			CASE WHEN $21::text IS NOT NULL AND $21::text != '' THEN $21::date ELSE NULL END,
+			$22, $23, $24, $25, $26, $27, $28, $29,
 			now()
 		)
 		ON CONFLICT (employee_id) DO UPDATE SET
@@ -290,6 +294,7 @@ func (directory *Directory) UpdatePersonalProfile(ctx context.Context, organizat
 			mobile_money_phone = COALESCE(EXCLUDED.mobile_money_phone, employee_personal_profiles.mobile_money_phone),
 			wallet_email = COALESCE(EXCLUDED.wallet_email, employee_personal_profiles.wallet_email),
 			handbook_signed_at = CASE WHEN EXCLUDED.handbook_signed_at IS NOT NULL THEN now() ELSE employee_personal_profiles.handbook_signed_at END,
+			handbook_signature_name = COALESCE(EXCLUDED.handbook_signature_name, employee_personal_profiles.handbook_signature_name),
 			birth_date = COALESCE(EXCLUDED.birth_date, employee_personal_profiles.birth_date),
 			bio = COALESCE(EXCLUDED.bio, employee_personal_profiles.bio),
 			avatar_url = COALESCE(EXCLUDED.avatar_url, employee_personal_profiles.avatar_url),
@@ -305,7 +310,7 @@ func (directory *Directory) UpdatePersonalProfile(ctx context.Context, organizat
 		p.EmergencyContactName, p.EmergencyContactRelationship, p.EmergencyContactPhone,
 		p.PaymentMethod, p.BankName, p.BankRoutingNumber, p.BankAccountNumber,
 		p.MobileMoneyProvider, p.MobileMoneyPhone, p.WalletEmail,
-		p.HandbookSignedAt,
+		p.HandbookSignedAt, p.HandbookSignatureName,
 		p.BirthDate, p.Bio, p.AvatarURL, p.ShirtSize, p.FavoriteFood, p.FavoriteMovies, p.FavoriteMusic, p.CoffeeTea, p.FunFact)
 
 	if err != nil {

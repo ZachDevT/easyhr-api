@@ -166,7 +166,7 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		INSERT INTO role_permissions (role_id, permission_key)
 		SELECT r.id, 'signatures:manage'
 		FROM roles r
-		WHERE r.key = 'company_owner' OR r.key LIKE '%admin%' OR r.display_name ILIKE '%admin%' OR r.display_name ILIKE '%owner%'
+		WHERE r.key = 'company_owner' OR r.key LIKE '%admin%' OR r.display_name ILIKE '%admin%' OR r.display_name ILIKE '%owner%' OR r.key ILIKE '%hr%' OR r.display_name ILIKE '%human resource%' OR r.display_name ILIKE '%hr%'
 		ON CONFLICT DO NOTHING;
 
 		CREATE TABLE IF NOT EXISTS signature_templates (
@@ -176,6 +176,8 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			category TEXT NOT NULL DEFAULT 'General',
 			description TEXT NOT NULL DEFAULT '',
 			body TEXT NOT NULL,
+			header_text TEXT NOT NULL DEFAULT '',
+			footer_text TEXT NOT NULL DEFAULT '',
 			requires_countersign BOOLEAN NOT NULL DEFAULT false,
 			expires_in_days INTEGER NOT NULL DEFAULT 14 CHECK (expires_in_days BETWEEN 1 AND 365),
 			is_active BOOLEAN NOT NULL DEFAULT true,
@@ -189,9 +191,20 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS title TEXT;
 		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS body_rendered TEXT;
 		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS body_sha256 CHAR(64);
+		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS header_rendered TEXT NOT NULL DEFAULT '';
+		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS footer_rendered TEXT NOT NULL DEFAULT '';
+		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS brand_color TEXT NOT NULL DEFAULT '#4F46E5';
+		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS logo_url TEXT NOT NULL DEFAULT '';
+		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS website_url TEXT NOT NULL DEFAULT '';
+		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS contact_phone TEXT NOT NULL DEFAULT '';
+		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS contact_email TEXT NOT NULL DEFAULT '';
+		ALTER TABLE signature_templates ADD COLUMN IF NOT EXISTS header_text TEXT NOT NULL DEFAULT '';
+		ALTER TABLE signature_templates ADD COLUMN IF NOT EXISTS footer_text TEXT NOT NULL DEFAULT '';
 		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
 		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS voided_at TIMESTAMPTZ;
 		ALTER TABLE signature_requests ADD COLUMN IF NOT EXISTS void_reason TEXT;
+		ALTER TABLE signature_requests DROP CONSTRAINT IF EXISTS signature_requests_status_check;
+		ALTER TABLE signature_requests ADD CONSTRAINT signature_requests_status_check CHECK (status IN ('draft','pending','sent','delivered','completed','declined','voided'));
 		ALTER TABLE signature_requests DROP CONSTRAINT IF EXISTS signature_requests_provider_check;
 		ALTER TABLE signature_requests ADD CONSTRAINT signature_requests_provider_check CHECK (provider IN ('docusign', 'native'));
 
@@ -203,6 +216,8 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		ALTER TABLE signature_recipients ADD COLUMN IF NOT EXISTS consent_at TIMESTAMPTZ;
 		ALTER TABLE signature_recipients ADD COLUMN IF NOT EXISTS decline_reason TEXT;
 		ALTER TABLE signature_recipients ADD COLUMN IF NOT EXISTS declined_at TIMESTAMPTZ;
+		ALTER TABLE signature_recipients DROP CONSTRAINT IF EXISTS signature_recipients_status_check;
+		ALTER TABLE signature_recipients ADD CONSTRAINT signature_recipients_status_check CHECK (status IN ('created','pending','sent','delivered','completed','declined'));
 		CREATE INDEX IF NOT EXISTS signature_recipients_employee_idx ON signature_recipients (employee_id);
 		CREATE INDEX IF NOT EXISTS signature_recipients_user_idx ON signature_recipients (user_id);
 
@@ -221,4 +236,3 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	_, err := pool.Exec(ctx, schemaSQL)
 	return err
 }
-

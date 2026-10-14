@@ -70,23 +70,20 @@ func (service *Service) CreateSelfPunch(ctx context.Context, org, userID string,
 	if err := input.Validate(); err != nil {
 		return Punch{}, err
 	}
-	employeeID := input.EmployeeID
-	if employeeID == "" {
-		err := service.pool.QueryRow(ctx, `SELECT id::text FROM employees WHERE organization_id=$1 AND user_id=$2 AND status IN ('onboarding','active','leave') LIMIT 1`, org, userID).Scan(&employeeID)
-		if err != nil {
-			// Fallback: check if user has an employee record by email or any employee in org
-			_ = service.pool.QueryRow(ctx, `
-				SELECT e.id::text FROM employees e
-				JOIN users u ON u.email = e.work_email
-				WHERE e.organization_id = $1 AND u.id = $2
-				LIMIT 1`, org, userID).Scan(&employeeID)
-		}
-		if employeeID == "" {
-			_ = service.pool.QueryRow(ctx, `SELECT id::text FROM employees WHERE organization_id=$1 AND status IN ('onboarding','active','leave') ORDER BY created_at ASC LIMIT 1`, org).Scan(&employeeID)
-		}
+	var employeeID string
+	err := service.pool.QueryRow(ctx, `SELECT id::text FROM employees WHERE organization_id=$1 AND user_id=$2 AND status IN ('onboarding','active','leave') LIMIT 1`, org, userID).Scan(&employeeID)
+	if err != nil {
+		_ = service.pool.QueryRow(ctx, `
+			SELECT e.id::text FROM employees e
+			JOIN users u ON LOWER(u.email) = LOWER(e.work_email)
+			WHERE e.organization_id = $1 AND u.id = $2
+			LIMIT 1`, org, userID).Scan(&employeeID)
 	}
 	if employeeID == "" {
 		return Punch{}, fmt.Errorf("no active employee found to record punch")
+	}
+	if input.EmployeeID != "" && input.EmployeeID != employeeID {
+		return Punch{}, fmt.Errorf("self-service punches can only be recorded for your own employee profile")
 	}
 	isBillable := true
 	if input.IsBillable != nil {
@@ -95,7 +92,7 @@ func (service *Service) CreateSelfPunch(ctx context.Context, org, userID string,
 		_ = service.pool.QueryRow(ctx, `SELECT is_billable FROM attendance_activities WHERE organization_id=$1 AND name=$2 LIMIT 1`, org, input.Activity).Scan(&isBillable)
 	}
 	result := Punch{EmployeeID: employeeID, Kind: input.Kind, OccurredAt: input.OccurredAt, Source: input.Source, Activity: input.Activity, IsBillable: isBillable, PolicyOutcome: "not_evaluated"}
-	err := service.pool.QueryRow(ctx, `INSERT INTO attendance_punches (organization_id,employee_id,kind,occurred_at,source,activity,is_billable,device_id,latitude,longitude,location_accuracy_meters,created_by_user_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id::text, created_at::text`, org, employeeID, input.Kind, input.OccurredAt, input.Source, nullIfBlank(input.Activity), isBillable, nullIfBlank(input.DeviceID), input.Latitude, input.Longitude, input.LocationAccuracyMeters, userID).Scan(&result.ID, &result.CreatedAt)
+	err = service.pool.QueryRow(ctx, `INSERT INTO attendance_punches (organization_id,employee_id,kind,occurred_at,source,activity,is_billable,device_id,latitude,longitude,location_accuracy_meters,created_by_user_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id::text, created_at::text`, org, employeeID, input.Kind, input.OccurredAt, input.Source, nullIfBlank(input.Activity), isBillable, nullIfBlank(input.DeviceID), input.Latitude, input.Longitude, input.LocationAccuracyMeters, userID).Scan(&result.ID, &result.CreatedAt)
 	if err != nil {
 		return Punch{}, err
 	}

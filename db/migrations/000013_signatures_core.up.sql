@@ -6,7 +6,7 @@ ON CONFLICT (key) DO NOTHING;
 CREATE TABLE signature_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
-    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE RESTRICT,
+    document_id UUID REFERENCES documents(id) ON DELETE RESTRICT,
     provider TEXT NOT NULL CHECK (provider IN ('docusign')),
     provider_envelope_id TEXT,
     status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'sent', 'delivered', 'completed', 'declined', 'voided')),

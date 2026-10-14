@@ -2,6 +2,8 @@ package payroll
 
 import (
 	"context"
+	"fmt"
+	"strings"
 )
 
 type Configuration struct {
@@ -9,6 +11,7 @@ type Configuration struct {
 	Country                string `json:"country"`
 	Currency               string `json:"currency"`
 	StandardMonthlyMinutes int    `json:"standardMonthlyMinutes"`
+	OrganizationID         string `json:"-"`
 }
 
 type CreateConfigurationInput struct {
@@ -17,15 +20,37 @@ type CreateConfigurationInput struct {
 	StandardMonthlyMinutes int    `json:"standardMonthlyMinutes"`
 }
 
+type TaxRule struct {
+	ID          string    `json:"id"`
+	Country     string    `json:"country"`
+	Currency    string    `json:"currency"`
+	RuleName    string    `json:"ruleName"`
+	RuleType    string    `json:"ruleType"`
+	Bands       []TaxBand `json:"bands"`
+	RatePercent float64   `json:"ratePercent"`
+	Active      bool      `json:"active"`
+}
+
+type TaxRuleInput struct {
+	Country     string    `json:"country"`
+	Currency    string    `json:"currency"`
+	RuleName    string    `json:"ruleName"`
+	RuleType    string    `json:"ruleType"`
+	Bands       []TaxBand `json:"bands"`
+	RatePercent float64   `json:"ratePercent"`
+}
+
 func (service *Service) CreateConfiguration(ctx context.Context, organizationID string, input CreateConfigurationInput) (Configuration, error) {
+	input.Country = strings.ToUpper(strings.TrimSpace(input.Country))
+	input.Currency = strings.ToUpper(strings.TrimSpace(input.Currency))
+	if len(input.Country) != 2 {
+		return Configuration{}, fmt.Errorf("country must be an ISO 3166-1 alpha-2 code")
+	}
+	if len(input.Currency) != 3 {
+		return Configuration{}, fmt.Errorf("currency must be a three-letter code")
+	}
 	if input.StandardMonthlyMinutes <= 0 {
-		input.StandardMonthlyMinutes = 9600
-	}
-	if input.Country == "" {
-		input.Country = "UG"
-	}
-	if input.Currency == "" {
-		input.Currency = "UGX"
+		return Configuration{}, fmt.Errorf("standardMonthlyMinutes must be positive")
 	}
 
 	var config Configuration

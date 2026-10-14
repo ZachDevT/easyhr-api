@@ -1,0 +1,9 @@
+ALTER TABLE signature_requests DROP COLUMN IF EXISTS contact_email;
+ALTER TABLE signature_requests DROP COLUMN IF EXISTS contact_phone;
+ALTER TABLE signature_requests DROP COLUMN IF EXISTS website_url;
+ALTER TABLE signature_requests DROP COLUMN IF EXISTS logo_url;
+ALTER TABLE signature_requests DROP COLUMN IF EXISTS brand_color;
+ALTER TABLE signature_requests DROP COLUMN IF EXISTS footer_rendered;
+ALTER TABLE signature_requests DROP COLUMN IF EXISTS header_rendered;
+ALTER TABLE signature_templates DROP COLUMN IF EXISTS footer_text;
+ALTER TABLE signature_templates DROP COLUMN IF EXISTS header_text;

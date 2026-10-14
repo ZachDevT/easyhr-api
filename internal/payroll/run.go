@@ -2,6 +2,7 @@ package payroll
 
 import (
 	"context"
+	"fmt"
 )
 
 type Run struct {
@@ -25,7 +26,7 @@ func (service *Service) InitiateRun(ctx context.Context, organizationID, actorUs
 
 	// Fetch Config
 	var config Configuration
-	err = service.pool.QueryRow(ctx, `SELECT id::text, country, currency, standard_monthly_minutes FROM payroll_configurations WHERE organization_id = $1 LIMIT 1`, organizationID).Scan(&config.ID, &config.Country, &config.Currency, &config.StandardMonthlyMinutes)
+	err = service.pool.QueryRow(ctx, `SELECT id::text, country, currency, standard_monthly_minutes,organization_id::text FROM payroll_configurations WHERE organization_id = $1 LIMIT 1`, organizationID).Scan(&config.ID, &config.Country, &config.Currency, &config.StandardMonthlyMinutes, &config.OrganizationID)
 	if err != nil {
 		return Run{}, ErrNotFound
 	}
@@ -77,7 +78,7 @@ func (service *Service) InitiateRun(ctx context.Context, organizationID, actorUs
 	for _, employeeID := range employeeIDs {
 		item, err := engine.Calculate(ctx, config, employeeID, period)
 		if err != nil {
-			continue // Skip or handle error
+			return Run{}, fmt.Errorf("calculate payroll for employee %s: %w", employeeID, err)
 		}
 
 		if item.BasePay == 0 && item.Earnings == 0 {
@@ -143,7 +144,8 @@ func (service *Service) LockRun(ctx context.Context, organizationID, actorUserID
 	// Generate paystubs for all run items
 	_, err = tx.Exec(ctx, `
 		INSERT INTO paystubs (payroll_run_item_id, delivery_status)
-		SELECT id, 'manual' FROM payroll_run_items WHERE payroll_run_id = $1
+		SELECT id, 'pending' FROM payroll_run_items WHERE payroll_run_id = $1
+		ON CONFLICT (payroll_run_item_id) DO NOTHING
 	`, runID)
 	if err != nil {
 		return err
@@ -235,4 +237,3 @@ func (service *Service) ListRunsForPeriod(ctx context.Context, organizationID, p
 	}
 	return items, nil
 }
-
