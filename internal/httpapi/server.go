@@ -31,6 +31,7 @@ import (
 	"github.com/easyhr/easyhr-be/internal/auth"
 	"github.com/easyhr/easyhr-be/internal/benefits"
 	"github.com/easyhr/easyhr-be/internal/celebrations"
+	"github.com/easyhr/easyhr-be/internal/chat"
 	"github.com/easyhr/easyhr-be/internal/documents"
 	"github.com/easyhr/easyhr-be/internal/email"
 	"github.com/easyhr/easyhr-be/internal/hiring"
@@ -93,6 +94,7 @@ type Server struct {
 	announcements *announcements.Service
 	celebrations  *celebrations.Service
 	notifications *notifications.Service
+	chat          *chat.Service
 }
 
 func New(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.Middleware, clerkSecretKey string) *Server {
@@ -140,7 +142,10 @@ func newServer(pool *pgxpool.Pool, allowedOrigins []string, authentication auth.
 	}))
 
 	emailSvc := email.NewService(os.Getenv("RESEND_API_KEY"), os.Getenv("EMAIL_FROM"), os.Getenv("EMAIL_FROM_NAME"))
-	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), storage: documentStorage, setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), operations: operations.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool), email: emailSvc, messaging: messaging.NewService(pool, emailSvc), announcements: announcements.NewService(pool), celebrations: celebrations.NewService(pool), notifications: notifications.NewService(pool)}
+	chatHub := chat.NewHub(pool, slog.Default(), nil)
+	chatSvc := chat.NewService(pool, chatHub, documentStorage, os.Getenv("CHAT_SIGNING_SECRET"), slog.Default())
+	chatHub.StartPostgresListener(context.Background())
+	s := &Server{echo: e, pool: pool, identity: identity.NewResolver(pool), provisioner: identity.NewProvisioner(pool, clerkSecretKey), people: people.NewDirectory(pool), timeOff: timeoff.NewService(pool), attendance: attendance.NewService(pool), onboarding: onboarding.NewService(pool), documents: documents.NewService(pool, documentStorage), storage: documentStorage, setup: tenancy.NewSetupService(pool), payroll: payroll.NewService(pool), signatures: signatures.NewService(pool), relations: relations.NewService(pool), hiring: hiring.NewService(pool), performance: performance.NewService(pool), workflows: workflows.NewService(pool), benefits: benefits.NewService(pool), promotions: promotions.NewService(pool), scheduling: scheduling.NewService(pool), holidays: holidays.NewService(pool), offboarding: offboarding.NewService(pool), policies: policies.NewService(pool), platform: platform.NewService(pool, "fallback_secret"), support: support.NewService(pool), operations: operations.NewService(pool), departments: tenancy.NewDepartmentService(pool), divisions: tenancy.NewDivisionService(pool), email: emailSvc, messaging: messaging.NewService(pool, emailSvc), announcements: announcements.NewService(pool), celebrations: celebrations.NewService(pool), notifications: notifications.NewService(pool), chat: chatSvc}
 	s.publicLimit = s.databaseRateLimit(20, time.Minute)
 	if authentication != nil {
 		s.authenticated = e.Group("/api/v1")
@@ -173,6 +178,12 @@ func adaptHTTPMiddleware(wrap auth.Middleware) echo.MiddlewareFunc {
 			if requestID := c.Response().Header().Get(echo.HeaderXRequestID); requestID != "" {
 				c.Request().Header.Set(echo.HeaderXRequestID, requestID)
 			}
+			if token := c.QueryParam("token"); token != "" && c.Request().Header.Get("Authorization") == "" {
+				c.Request().Header.Set("Authorization", "Bearer "+token)
+			}
+			if ws := c.QueryParam("workspace"); ws != "" && c.Request().Header.Get("X-EasyHR-Workspace") == "" {
+				c.Request().Header.Set("X-EasyHR-Workspace", ws)
+			}
 			wrap(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				c.SetRequest(request)
 				handlerError = next(c)
@@ -183,6 +194,12 @@ func adaptHTTPMiddleware(wrap auth.Middleware) echo.MiddlewareFunc {
 }
 
 func (s *Server) Handler() http.Handler { return s.echo }
+
+func (s *Server) Close() {
+	if s.chat != nil && s.chat.Hub() != nil {
+		s.chat.Hub().Close()
+	}
+}
 
 func (s *Server) databaseRateLimit(limit int, window time.Duration) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
@@ -412,10 +429,45 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/operations/data-jobs", s.createTenantDataJob)
 		s.api.GET("/operations/features", s.listTenantFeatures)
 
+		// Workspace Chat
+		s.api.GET("/chat/channels", s.listChatChannels)
+		s.api.POST("/chat/channels", s.createChatChannel)
+		s.api.POST("/chat/channels/dm", s.getOrCreateDM)
+		s.api.PATCH("/chat/channels/:channelId", s.updateChatChannel)
+		s.api.POST("/chat/channels/:channelId/archive", s.archiveChatChannel)
+		s.api.DELETE("/chat/channels/:channelId", s.deleteChatChannel)
+		s.api.POST("/chat/channels/:channelId/join", s.joinChatChannel)
+		s.api.POST("/chat/channels/:channelId/leave", s.leaveChatChannel)
+		s.api.POST("/chat/channels/:channelId/request-join", s.requestJoinChatChannel)
+		s.api.POST("/chat/channels/:channelId/review-request", s.reviewJoinRequest)
+		s.api.POST("/chat/channels/:channelId/members", s.addChatMember)
+		s.api.DELETE("/chat/channels/:channelId/members/:memberId", s.removeChatMember)
+		s.api.POST("/chat/channels/:channelId/read", s.markChatChannelRead)
+		s.api.PATCH("/chat/channels/:channelId/preferences", s.updateChatChannelPreferences)
+
+		s.api.GET("/chat/messages", s.listChatMessages)
+		s.api.GET("/chat/messages/search", s.searchChatMessages)
+		s.api.GET("/chat/messages/:messageId/replies", s.getThreadReplies)
+		s.api.POST("/chat/messages", s.sendChatMessage)
+		s.api.PATCH("/chat/messages/:messageId", s.editChatMessage)
+		s.api.DELETE("/chat/messages/:messageId", s.deleteChatMessage)
+		s.api.POST("/chat/messages/:messageId/pin", s.togglePinMessage)
+		s.api.POST("/chat/messages/:messageId/save", s.toggleSaveMessage)
+		s.api.POST("/chat/messages/:messageId/reactions", s.toggleChatReaction)
+		s.api.POST("/chat/messages/:messageId/poll/vote", s.voteChatPoll)
+		s.api.POST("/chat/messages/:messageId/poll/close", s.toggleCloseChatPoll)
+
+		s.api.POST("/chat/attachments", s.uploadChatAttachment)
+		s.api.POST("/chat/typing", s.setChatTyping)
+		s.api.GET("/chat/presence", s.listChatPresence)
+		s.api.PATCH("/chat/presence", s.updateChatPresence)
+		s.api.GET("/chat/events", s.chatEventsSSE)
+
 		s.authenticated.POST("/setup/organizations", s.createOrganization)
 		s.authenticated.POST("/auth/provision", s.provisionIdentity)
 		s.authenticated.GET("/setup/status", s.checkSetupStatus)
 	}
+	s.echo.GET("/api/v1/chat/attachments/:attachmentId/content", s.getChatAttachmentContent)
 	s.echo.GET("/api/v1/public/assets/*", s.servePublicAsset)
 	s.echo.HEAD("/api/v1/public/assets/*", s.servePublicAsset)
 	s.echo.GET("/api/v1/public/jobs", s.listPublicJobs)

@@ -53,6 +53,11 @@ func NewResolver(pool *pgxpool.Pool) *Resolver {
 // has an ACTIVE membership in that workspace in PostgreSQL before granting access.
 func (resolver *Resolver) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if _, ok := PrincipalFromContext(request.Context()); ok {
+			next.ServeHTTP(writer, request)
+			return
+		}
+
 		claims, ok := clerk.SessionClaimsFromContext(request.Context())
 		if !ok || claims == nil || claims.Subject == "" {
 			writeProblem(writer, request, http.StatusUnauthorized, "auth.missing_token", "Unauthorized", "A verified session is required")
