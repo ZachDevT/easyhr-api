@@ -203,6 +203,9 @@ type UpdateChannelInput struct {
 
 type CreateDMInput struct {
 	ParticipantIDs []string `json:"participantIds"`
+	ParticipantID  string   `json:"participantId,omitempty"`
+	EmployeeID     string   `json:"employeeId,omitempty"`
+	UserID         string   `json:"userId,omitempty"`
 	Name           string   `json:"name,omitempty"`
 }
 

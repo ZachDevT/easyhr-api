@@ -571,10 +571,8 @@ func (s *Service) ListChannels(ctx context.Context, actor Actor) ([]Channel, err
 		LEFT JOIN unread_counts uc ON uc.channel_id = c.id
 		WHERE c.organization_id = $1::uuid
 		  AND (
-		      c.is_private = false 
-		      OR ms.channel_id IS NOT NULL 
-		      OR $3 = true 
-		      OR c.created_by_employee_id = $2::uuid
+		      (c.channel_type = 'channel' AND (c.is_private = false OR ms.channel_id IS NOT NULL OR $3 = true OR c.created_by_employee_id = $2::uuid))
+		      OR (c.channel_type IN ('dm', 'group_dm') AND ms.channel_id IS NOT NULL)
 		  )
 		ORDER BY c.is_archived ASC, lm.last_msg_at DESC NULLS LAST, c.name ASC
 	`
@@ -879,21 +877,51 @@ func (s *Service) CreateChannel(ctx context.Context, actor Actor, in CreateChann
 }
 
 func (s *Service) GetOrCreateDM(ctx context.Context, actor Actor, in CreateDMInput) (Channel, error) {
-	participants := map[string]bool{actor.EmployeeID: true}
-	for _, pid := range in.ParticipantIDs {
+	// Gather all participant IDs
+	rawParticipants := make([]string, 0, len(in.ParticipantIDs)+3)
+	if in.ParticipantID != "" {
+		rawParticipants = append(rawParticipants, in.ParticipantID)
+	}
+	if in.EmployeeID != "" {
+		rawParticipants = append(rawParticipants, in.EmployeeID)
+	}
+	if in.UserID != "" {
+		rawParticipants = append(rawParticipants, in.UserID)
+	}
+	rawParticipants = append(rawParticipants, in.ParticipantIDs...)
+
+	// Resolve all participants to valid employee UUIDs within this organization
+	participantMap := make(map[string]bool)
+	if actor.EmployeeID != "" {
+		participantMap[actor.EmployeeID] = true
+	}
+
+	for _, pid := range rawParticipants {
 		pid = strings.TrimSpace(pid)
-		if pid != "" {
-			participants[pid] = true
+		if pid == "" {
+			continue
+		}
+		var empUUID string
+		_ = s.pool.QueryRow(ctx, `
+			SELECT id::text FROM employees
+			WHERE organization_id = $1::uuid
+			  AND (
+			    (CASE WHEN $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN id = $2::uuid OR user_id = $2::uuid ELSE false END)
+			  )
+			LIMIT 1
+		`, actor.OrganizationID, pid).Scan(&empUUID)
+		if empUUID != "" {
+			participantMap[empUUID] = true
 		}
 	}
 
-	pList := make([]string, 0, len(participants))
-	for pid := range participants {
+	pList := make([]string, 0, len(participantMap))
+	for pid := range participantMap {
 		pList = append(pList, pid)
 	}
 
 	if len(pList) < 2 {
-		return Channel{}, fmt.Errorf("%w: a direct message requires at least one other participant", ErrInvalidInput)
+		return Channel{}, fmt.Errorf("%w: a direct message requires at least one other participant in your organization", ErrInvalidInput)
 	}
 
 	channelType := "dm"
@@ -901,7 +929,7 @@ func (s *Service) GetOrCreateDM(ctx context.Context, actor Actor, in CreateDMInp
 		channelType = "group_dm"
 	}
 
-	// Compute canonical dm_key
+	// Sort to compute canonical dm_key: e.g. "empUUID1:empUUID2"
 	sortCopy := make([]string, len(pList))
 	copy(sortCopy, pList)
 	for i := 0; i < len(sortCopy); i++ {
@@ -913,22 +941,32 @@ func (s *Service) GetOrCreateDM(ctx context.Context, actor Actor, in CreateDMInp
 	}
 	dmKey := strings.Join(sortCopy, ":")
 
+	// Check if this DM channel already exists
 	var existingID string
 	err := s.pool.QueryRow(ctx, `
 		SELECT id::text FROM chat_channels
 		WHERE organization_id = $1::uuid AND dm_key = $2
+		LIMIT 1
 	`, actor.OrganizationID, dmKey).Scan(&existingID)
 	if err == nil && existingID != "" {
-		channels, err := s.ListChannels(ctx, actor)
+		// Ensure all participants are members
+		for _, pid := range pList {
+			_, _ = s.pool.Exec(ctx, `
+				INSERT INTO chat_channel_members (channel_id, organization_id, employee_id, user_id, role, joined_at)
+				SELECT $1::uuid, $2::uuid, e.id, e.user_id, 'member', NOW()
+				FROM employees e
+				WHERE e.organization_id = $2::uuid AND e.id = $3::uuid
+				ON CONFLICT (channel_id, employee_id) DO NOTHING
+			`, existingID, actor.OrganizationID, pid)
+		}
+		s.InvalidateAuthCache(actor.OrganizationID, existingID)
+		ch, err := s.GetChannel(ctx, actor, existingID)
 		if err == nil {
-			for _, ch := range channels {
-				if ch.ID == existingID {
-					return ch, nil
-				}
-			}
+			return ch, nil
 		}
 	}
 
+	// Compute display name for DM
 	dmName := in.Name
 	if dmName == "" {
 		var names []string
@@ -936,12 +974,13 @@ func (s *Service) GetOrCreateDM(ctx context.Context, actor Actor, in CreateDMInp
 			SELECT first_name || ' ' || last_name
 			FROM employees
 			WHERE organization_id = $1::uuid AND id = ANY($2::uuid[])
+			ORDER BY first_name ASC
 		`, actor.OrganizationID, pList)
 		if err == nil {
 			for rows.Next() {
 				var n string
-				if err := rows.Scan(&n); err == nil && n != "" {
-					names = append(names, n)
+				if err := rows.Scan(&n); err == nil && strings.TrimSpace(n) != "" {
+					names = append(names, strings.TrimSpace(n))
 				}
 			}
 			rows.Close()
@@ -956,13 +995,15 @@ func (s *Service) GetOrCreateDM(ctx context.Context, actor Actor, in CreateDMInp
 	chID := newUUID()
 	now := time.Now().UTC()
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Channel{}, err
+	var validActorUserID, validActorEmpID string
+	if uuidRegex.MatchString(actor.UserID) {
+		validActorUserID = actor.UserID
 	}
-	defer tx.Rollback(ctx)
+	if uuidRegex.MatchString(actor.EmployeeID) {
+		validActorEmpID = actor.EmployeeID
+	}
 
-	_, err = tx.Exec(ctx, `
+	_, err = s.pool.Exec(ctx, `
 		INSERT INTO chat_channels (
 			id, organization_id, name, channel_type, topic, description,
 			is_private, department_restricted, dm_key,
@@ -971,47 +1012,60 @@ func (s *Service) GetOrCreateDM(ctx context.Context, actor Actor, in CreateDMInp
 		) VALUES (
 			$1::uuid, $2::uuid, $3, $4, 'Direct Message', 'Direct conversation',
 			true, false, $5,
-			NULLIF($6, '')::uuid, NULLIF($7, '')::uuid, $8,
+			CASE WHEN EXISTS (SELECT 1 FROM users WHERE id = NULLIF($6, '')::uuid) THEN NULLIF($6, '')::uuid ELSE NULL END,
+			CASE WHEN EXISTS (SELECT 1 FROM employees WHERE id = NULLIF($7, '')::uuid) THEN NULLIF($7, '')::uuid ELSE NULL END,
+			$8,
 			$9, $9
 		)
 	`, chID, actor.OrganizationID, dmName, channelType, dmKey,
-		actor.UserID, actor.EmployeeID, actor.FullName, now)
+		validActorUserID, validActorEmpID, actor.FullName, now)
 	if err != nil {
-		return Channel{}, err
+		return Channel{}, fmt.Errorf("create DM channel failed: %w", err)
 	}
 
+	// Add all participants as members
 	for _, pid := range pList {
-		_, _ = tx.Exec(ctx, `
+		_, _ = s.pool.Exec(ctx, `
 			INSERT INTO chat_channel_members (channel_id, organization_id, employee_id, user_id, role, joined_at)
-			VALUES (
-				$1::uuid, $2::uuid, $3::uuid,
-				(SELECT user_id FROM employees WHERE id = $3::uuid),
-				'member', $4
-			) ON CONFLICT DO NOTHING
+			SELECT $1::uuid, $2::uuid, e.id, e.user_id, 'member', $4
+			FROM employees e
+			WHERE e.organization_id = $2::uuid AND e.id = $3::uuid
+			ON CONFLICT (channel_id, employee_id) DO NOTHING
 		`, chID, actor.OrganizationID, pid, now)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return Channel{}, err
 	}
 
 	s.InvalidateAuthCache(actor.OrganizationID, chID)
 
-	ch := Channel{
-		ID:             chID,
-		OrganizationID: actor.OrganizationID,
-		Name:           dmName,
-		Description:    "Direct conversation",
-		Topic:          "Direct Message",
-		IsPrivate:      true,
-		ChannelType:    channelType,
-		UnreadCount:    0,
-		LastMessageAt:  now.Format(time.RFC3339),
-		MemberIDs:      pList,
-		CreatedBy:      actor.FullName,
-		CreatedAt:      now.Format(time.RFC3339),
-		UpdatedAt:      now.Format(time.RFC3339),
+	ch, err := s.GetChannel(ctx, actor, chID)
+	if err != nil {
+		ch = Channel{
+			ID:             chID,
+			OrganizationID: actor.OrganizationID,
+			Name:           dmName,
+			Description:    "Direct conversation",
+			Topic:          "Direct Message",
+			IsPrivate:      true,
+			ChannelType:    channelType,
+			UnreadCount:    0,
+			LastMessageAt:  now.Format(time.RFC3339),
+			MemberIDs:      pList,
+			CreatedBy:      actor.FullName,
+			CreatedAt:      now.Format(time.RFC3339),
+			UpdatedAt:      now.Format(time.RFC3339),
+		}
 	}
+
+	// Broadcast channel creation to all participants
+	s.hub.Publish(RealtimeEvent{
+		Version:        EventVersionV1,
+		Type:           EventChannelCreated,
+		OrganizationID: actor.OrganizationID,
+		ChannelID:      chID,
+		ActorID:        actor.EmployeeID,
+		TargetIDs:      pList,
+		Payload:        ch,
+		Timestamp:      now.Format(time.RFC3339),
+	})
 
 	return ch, nil
 }
