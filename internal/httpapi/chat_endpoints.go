@@ -257,6 +257,8 @@ func (s *Server) reviewJoinRequest(c echo.Context) error {
 
 type memberActionInput struct {
 	EmployeeID string `json:"employeeId"`
+	MemberID   string `json:"memberId"`
+	UserID     string `json:"userId"`
 }
 
 // POST /api/v1/chat/channels/:channelId/members
@@ -268,11 +270,21 @@ func (s *Server) addChatMember(c echo.Context) error {
 
 	channelID := c.Param("channelId")
 	var in memberActionInput
-	if err := c.Bind(&in); err != nil || in.EmployeeID == "" {
-		return problem(c, http.StatusBadRequest, "chat.invalid_input", "Invalid member input", "Employee ID is required")
+	if err := c.Bind(&in); err != nil {
+		return problem(c, http.StatusBadRequest, "chat.invalid_input", "Invalid member input", "Invalid payload")
+	}
+	targetID := strings.TrimSpace(in.EmployeeID)
+	if targetID == "" {
+		targetID = strings.TrimSpace(in.MemberID)
+	}
+	if targetID == "" {
+		targetID = strings.TrimSpace(in.UserID)
+	}
+	if targetID == "" {
+		return problem(c, http.StatusBadRequest, "chat.invalid_input", "Invalid member input", "Employee ID or User ID is required")
 	}
 
-	if err := s.chat.AddMember(c.Request().Context(), actor, channelID, in.EmployeeID); err != nil {
+	if err := s.chat.AddMember(c.Request().Context(), actor, channelID, targetID); err != nil {
 		if errors.Is(err, chat.ErrForbidden) {
 			return problem(c, http.StatusForbidden, "chat.forbidden", "Forbidden", "You do not have permission to add members to this channel")
 		}

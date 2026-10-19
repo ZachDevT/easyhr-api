@@ -623,27 +623,163 @@ func (s *Service) ListChannels(ctx context.Context, actor Actor) ([]Channel, err
 	return channels, nil
 }
 
+// GetChannel fetches a fully aggregated single channel record by ID or name
+func (s *Service) GetChannel(ctx context.Context, actor Actor, channelID string) (Channel, error) {
+	query := `
+		WITH member_stats AS (
+			SELECT 
+				channel_id,
+				is_muted,
+				last_read_message_id,
+				last_read_at
+			FROM chat_channel_members
+			WHERE organization_id = $1::uuid AND (employee_id = $2::uuid OR $2 = '')
+		),
+		channel_members_agg AS (
+			SELECT 
+				channel_id,
+				array_agg(employee_id::text) AS member_ids
+			FROM chat_channel_members
+			WHERE organization_id = $1::uuid
+			GROUP BY channel_id
+		),
+		pending_requests_agg AS (
+			SELECT 
+				channel_id,
+				array_agg(employee_id::text) AS pending_ids
+			FROM chat_channel_join_requests
+			WHERE organization_id = $1::uuid AND status = 'pending'
+			GROUP BY channel_id
+		),
+		last_messages AS (
+			SELECT 
+				channel_id,
+				MAX(created_at) AS last_msg_at
+			FROM chat_messages
+			WHERE organization_id = $1::uuid AND deleted_at IS NULL
+			GROUP BY channel_id
+		),
+		unread_counts AS (
+			SELECT 
+				m.channel_id,
+				COUNT(msg.id) AS unread_count
+			FROM member_stats m
+			JOIN chat_messages msg ON msg.channel_id = m.channel_id AND msg.organization_id = $1::uuid AND msg.deleted_at IS NULL
+			WHERE (m.last_read_at IS NULL OR msg.created_at > m.last_read_at)
+			  AND ($2 = '' OR msg.sender_employee_id != $2::uuid)
+			GROUP BY m.channel_id
+		)
+		SELECT 
+			c.id::text,
+			c.name,
+			c.description,
+			c.topic,
+			c.is_private,
+			c.channel_type,
+			COALESCE(c.department_name, ''),
+			COALESCE(c.created_by_name, 'System'),
+			c.is_archived,
+			c.created_at,
+			c.updated_at,
+			COALESCE(lm.last_msg_at, c.created_at),
+			COALESCE(ms.is_muted, false),
+			COALESCE(ms.last_read_message_id::text, ''),
+			COALESCE(ms.last_read_at, '1970-01-01'::timestamptz),
+			COALESCE(uc.unread_count, 0),
+			COALESCE(cma.member_ids, ARRAY[]::text[]),
+			COALESCE(pra.pending_ids, ARRAY[]::text[])
+		FROM chat_channels c
+		LEFT JOIN member_stats ms ON ms.channel_id = c.id
+		LEFT JOIN channel_members_agg cma ON cma.channel_id = c.id
+		LEFT JOIN pending_requests_agg pra ON pra.channel_id = c.id
+		LEFT JOIN last_messages lm ON lm.channel_id = c.id
+		LEFT JOIN unread_counts uc ON uc.channel_id = c.id
+		WHERE c.organization_id = $1::uuid
+		  AND (
+		      (CASE WHEN $3 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN c.id = $3::uuid ELSE false END)
+		      OR lower(c.name) = lower($3)
+		  )
+		LIMIT 1
+	`
+
+	var ch Channel
+	var createdAt, updatedAt, lastMsgAt, lastReadAt time.Time
+	var lastReadMsgID string
+
+	err := s.pool.QueryRow(ctx, query, actor.OrganizationID, actor.EmployeeID, channelID).Scan(
+		&ch.ID, &ch.Name, &ch.Description, &ch.Topic,
+		&ch.IsPrivate, &ch.ChannelType, &ch.DepartmentRestriction,
+		&ch.CreatedBy, &ch.IsArchived, &createdAt, &updatedAt,
+		&lastMsgAt, &ch.IsMuted, &lastReadMsgID, &lastReadAt,
+		&ch.UnreadCount, &ch.MemberIDs, &ch.PendingRequestUserIDs,
+	)
+	if err != nil {
+		return Channel{}, err
+	}
+
+	ch.OrganizationID = actor.OrganizationID
+	ch.CreatedAt = createdAt.Format(time.RFC3339)
+	ch.UpdatedAt = updatedAt.Format(time.RFC3339)
+	ch.LastMessageAt = lastMsgAt.Format(time.RFC3339)
+	if lastReadMsgID != "" {
+		ch.LastReadMessageID = lastReadMsgID
+		ch.LastReadAt = lastReadAt.Format(time.RFC3339)
+	}
+	if ch.MemberIDs == nil {
+		ch.MemberIDs = []string{}
+	}
+	if ch.PendingRequestUserIDs == nil {
+		ch.PendingRequestUserIDs = []string{}
+	}
+	return ch, nil
+}
+
 func (s *Service) CreateChannel(ctx context.Context, actor Actor, in CreateChannelInput) (Channel, error) {
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
 		return Channel{}, fmt.Errorf("%w: channel name cannot be empty", ErrInvalidInput)
 	}
 	name = strings.TrimPrefix(name, "#")
+	name = strings.ToLower(name)
 
+	// Idempotency: if channel with the same name already exists in this org, reuse it seamlessly
+	var existingID string
+	var existingIsArchived bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT id::text, is_archived
+		FROM chat_channels
+		WHERE organization_id = $1::uuid AND lower(name) = lower($2) AND channel_type = 'channel'
+		LIMIT 1
+	`, actor.OrganizationID, name).Scan(&existingID, &existingIsArchived)
+	if err == nil && existingID != "" {
+		if existingIsArchived {
+			_, _ = s.pool.Exec(ctx, `UPDATE chat_channels SET is_archived = false, updated_at = NOW() WHERE id = $1::uuid`, existingID)
+		}
+		if actor.EmployeeID != "" {
+			_ = s.AddMember(ctx, actor, existingID, actor.EmployeeID)
+		}
+		for _, mid := range in.MemberIDs {
+			mid = strings.TrimSpace(mid)
+			if mid != "" {
+				_ = s.AddMember(ctx, actor, existingID, mid)
+			}
+		}
+		s.InvalidateAuthCache(actor.OrganizationID, existingID)
+		ch, getErr := s.GetChannel(ctx, actor, existingID)
+		if getErr == nil {
+			return ch, nil
+		}
+	}
+
+	// Strictly normalize channel_type to conform to database CHECK (channel_type IN ('channel', 'dm', 'group_dm'))
 	channelType := in.ChannelType
-	if channelType == "" {
+	if channelType != "dm" && channelType != "group_dm" {
 		channelType = "channel"
 	}
 
 	chID := newUUID()
 	now := time.Now().UTC()
 	deptRestricted := in.DepartmentRestriction != ""
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Channel{}, err
-	}
-	defer tx.Rollback(ctx)
 
 	var validActorUserID, validActorEmpID string
 	if uuidRegex.MatchString(actor.UserID) {
@@ -653,7 +789,8 @@ func (s *Service) CreateChannel(ctx context.Context, actor Actor, in CreateChann
 		validActorEmpID = actor.EmployeeID
 	}
 
-	_, err = tx.Exec(ctx, `
+	// Safe insert into chat_channels with conditional foreign key validation
+	_, err = s.pool.Exec(ctx, `
 		INSERT INTO chat_channels (
 			id, organization_id, name, channel_type, topic, description,
 			is_private, department_restricted, department_name,
@@ -662,7 +799,9 @@ func (s *Service) CreateChannel(ctx context.Context, actor Actor, in CreateChann
 		) VALUES (
 			$1::uuid, $2::uuid, $3, $4, $5, $6,
 			$7, $8, NULLIF($9, ''),
-			NULLIF($10, '')::uuid, NULLIF($11, '')::uuid, $12,
+			CASE WHEN EXISTS (SELECT 1 FROM users WHERE id = NULLIF($10, '')::uuid) THEN NULLIF($10, '')::uuid ELSE NULL END,
+			CASE WHEN EXISTS (SELECT 1 FROM employees WHERE id = NULLIF($11, '')::uuid) THEN NULLIF($11, '')::uuid ELSE NULL END,
+			$12,
 			$13, $13
 		)
 	`, chID, actor.OrganizationID, name, channelType, in.Topic, in.Description,
@@ -672,13 +811,14 @@ func (s *Service) CreateChannel(ctx context.Context, actor Actor, in CreateChann
 		return Channel{}, fmt.Errorf("create channel failed: %w", err)
 	}
 
+	// Safely insert creator and initial members
 	membersToInsert := make(map[string]bool)
-	if validActorEmpID != "" {
-		membersToInsert[validActorEmpID] = true
+	if actor.EmployeeID != "" {
+		membersToInsert[actor.EmployeeID] = true
 	}
 	for _, mid := range in.MemberIDs {
 		mid = strings.TrimSpace(mid)
-		if mid != "" && uuidRegex.MatchString(mid) {
+		if mid != "" {
 			membersToInsert[mid] = true
 		}
 	}
@@ -686,43 +826,43 @@ func (s *Service) CreateChannel(ctx context.Context, actor Actor, in CreateChann
 	memberIDsSlice := make([]string, 0, len(membersToInsert))
 	for mid := range membersToInsert {
 		role := "member"
-		if mid == validActorEmpID {
+		if mid == actor.EmployeeID {
 			role = "admin"
 		}
-		_, _ = tx.Exec(ctx, `
+		_, _ = s.pool.Exec(ctx, `
 			INSERT INTO chat_channel_members (channel_id, organization_id, employee_id, user_id, role, joined_at)
-			VALUES (
-				$1::uuid, $2::uuid, $3::uuid, 
-				(SELECT user_id FROM employees WHERE id = $3::uuid),
-				$4, $5
-			)
-			ON CONFLICT DO NOTHING
+			SELECT $1::uuid, $2::uuid, e.id, e.user_id, $4, $5
+			FROM employees e
+			WHERE e.organization_id = $2::uuid
+			  AND (
+			    (CASE WHEN $3 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN e.id = $3::uuid OR e.user_id = $3::uuid ELSE false END)
+			  )
+			ON CONFLICT (channel_id, employee_id) DO NOTHING
 		`, chID, actor.OrganizationID, mid, role, now)
 		memberIDsSlice = append(memberIDsSlice, mid)
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return Channel{}, err
-	}
-
 	s.InvalidateAuthCache(actor.OrganizationID, chID)
 
-	ch := Channel{
-		ID:                    chID,
-		OrganizationID:        actor.OrganizationID,
-		Name:                  name,
-		Description:           in.Description,
-		Topic:                 in.Topic,
-		IsPrivate:             in.IsPrivate,
-		ChannelType:           channelType,
-		DepartmentRestriction: in.DepartmentRestriction,
-		UnreadCount:           0,
-		LastMessageAt:         now.Format(time.RFC3339),
-		MemberIDs:             memberIDsSlice,
-		PendingRequestUserIDs: []string{},
-		CreatedBy:             actor.FullName,
-		CreatedAt:             now.Format(time.RFC3339),
-		UpdatedAt:             now.Format(time.RFC3339),
+	ch, err := s.GetChannel(ctx, actor, chID)
+	if err != nil {
+		ch = Channel{
+			ID:                    chID,
+			OrganizationID:        actor.OrganizationID,
+			Name:                  name,
+			Description:           in.Description,
+			Topic:                 in.Topic,
+			IsPrivate:             in.IsPrivate,
+			ChannelType:           channelType,
+			DepartmentRestriction: in.DepartmentRestriction,
+			UnreadCount:           0,
+			LastMessageAt:         now.Format(time.RFC3339),
+			MemberIDs:             memberIDsSlice,
+			PendingRequestUserIDs: []string{},
+			CreatedBy:             actor.FullName,
+			CreatedAt:             now.Format(time.RFC3339),
+			UpdatedAt:             now.Format(time.RFC3339),
+		}
 	}
 
 	s.hub.Publish(RealtimeEvent{
@@ -1153,18 +1293,21 @@ func (s *Service) AddMember(ctx context.Context, actor Actor, channelID, targetE
 
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO chat_channel_members (channel_id, organization_id, employee_id, user_id, role, joined_at)
-		VALUES (
-			$1::uuid, $2::uuid, $3::uuid,
-			(SELECT user_id FROM employees WHERE id = $3::uuid),
-			'member', NOW()
-		)
-		ON CONFLICT DO NOTHING
+		SELECT $1::uuid, $2::uuid, e.id, e.user_id, 'member', NOW()
+		FROM employees e
+		WHERE e.organization_id = $2::uuid
+		  AND (
+		    (CASE WHEN $3 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN e.id = $3::uuid OR e.user_id = $3::uuid ELSE false END)
+		  )
+		ON CONFLICT (channel_id, employee_id) DO NOTHING
 	`, channelID, actor.OrganizationID, targetEmployeeID)
 	if err != nil {
 		return err
 	}
 
 	s.InvalidateAuthCache(actor.OrganizationID, channelID)
+
+	ch, _ := s.GetChannel(ctx, actor, channelID)
 
 	s.hub.Publish(RealtimeEvent{
 		Version:        EventVersionV1,
@@ -1175,6 +1318,7 @@ func (s *Service) AddMember(ctx context.Context, actor Actor, channelID, targetE
 		Payload: map[string]any{
 			"channelId":  channelID,
 			"employeeId": targetEmployeeID,
+			"channel":    ch,
 		},
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	})
