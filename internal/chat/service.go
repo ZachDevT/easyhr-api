@@ -2986,8 +2986,8 @@ func (s *Service) dispatchNotifications(actor Actor, channelID, msgID, content, 
 		if err == nil {
 			for empRows.Next() {
 				var r recipient
-				if err := empRows.Scan(&r.userID, &r.employeeID, &r.fullName, &r.isMuted, &r.dnd); err == nil && r.userID != "" {
-					recipientsMap[r.userID] = r
+				if err := empRows.Scan(&r.userID, &r.employeeID, &r.fullName, &r.isMuted, &r.dnd); err == nil && r.employeeID != "" {
+					recipientsMap[r.employeeID] = r
 				}
 			}
 			empRows.Close()
@@ -3035,8 +3035,32 @@ func (s *Service) dispatchNotifications(actor Actor, channelID, msgID, content, 
 		if shouldNotify {
 			_, _ = s.pool.Exec(ctx, `
 				INSERT INTO user_notifications (organization_id, user_id, title, message, category, link, created_at)
-				VALUES ($1::uuid, $2::uuid, $3, $4, 'chat', '/chat', NOW())
-			`, actor.OrganizationID, rec.userID, title, preview)
+				SELECT $1::uuid, u.id, $3, $4, 'chat', '/chat', NOW()
+				FROM users u
+				WHERE u.id = (
+					SELECT COALESCE(
+						(SELECT id FROM users WHERE (CASE WHEN $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN id = $2::uuid ELSE false END)),
+						(SELECT u2.id FROM employees e JOIN users u2 ON u2.id = e.user_id OR LOWER(u2.email) = LOWER(e.work_email) WHERE (CASE WHEN $5 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN e.id = $5::uuid ELSE false END) LIMIT 1),
+						(SELECT m.user_id FROM employees e JOIN memberships m ON m.organization_id = e.organization_id AND (m.user_id = e.user_id OR LOWER(m.user_id::text) = LOWER(e.user_id::text)) WHERE (CASE WHEN $5 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN e.id = $5::uuid ELSE false END) LIMIT 1)
+					)
+				)
+			`, actor.OrganizationID, rec.userID, title, preview, rec.employeeID)
+
+			s.hub.Publish(RealtimeEvent{
+				Version:        EventVersionV1,
+				Type:           EventNotificationCreated,
+				OrganizationID: actor.OrganizationID,
+				ChannelID:      channelID,
+				ActorID:        actor.EmployeeID,
+				TargetIDs:      []string{rec.employeeID},
+				Payload: map[string]any{
+					"title":    title,
+					"message":  preview,
+					"category": "chat",
+					"link":     "/chat",
+				},
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
 		}
 	}
 }
