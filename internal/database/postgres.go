@@ -60,6 +60,7 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 				('organization:read'),
 				('employees:read')
 		) AS p(key)
+		JOIN permissions perm ON perm.key = p.key
 		WHERE r.key = 'employee' OR r.display_name ILIKE '%employee%'
 		ON CONFLICT DO NOTHING;
 
@@ -88,6 +89,7 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 				('documents:read'),
 				('documents:manage')
 		) AS p(key)
+		JOIN permissions perm ON perm.key = p.key
 		WHERE r.key ILIKE '%hr%' OR r.key ILIKE '%manager%' OR r.key ILIKE '%lead%' OR r.key ILIKE '%admin%' OR r.key ILIKE '%owner%'
 		   OR r.display_name ILIKE '%hr%' OR r.display_name ILIKE '%manager%' OR r.display_name ILIKE '%lead%' OR r.display_name ILIKE '%admin%' OR r.display_name ILIKE '%owner%'
 		ON CONFLICT DO NOTHING;
@@ -246,11 +248,13 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		CROSS JOIN (
 			VALUES ('chat:read'), ('chat:write')
 		) AS p(key)
+		JOIN permissions perm ON perm.key = p.key
 		ON CONFLICT DO NOTHING;
 
 		INSERT INTO role_permissions (role_id, permission_key)
-		SELECT r.id, 'chat:manage_channels'
+		SELECT r.id, perm.key
 		FROM roles r
+		JOIN permissions perm ON perm.key = 'chat:manage_channels'
 		WHERE r.key = 'company_owner'
 		   OR r.key ILIKE '%admin%'
 		   OR r.key ILIKE '%hr%'

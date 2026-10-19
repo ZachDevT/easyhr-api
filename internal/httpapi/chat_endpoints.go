@@ -428,6 +428,9 @@ func (s *Server) getThreadReplies(c echo.Context) error {
 
 	channelID := c.QueryParam("channelId")
 	parentID := c.Param("messageId")
+	if channelID == "" && parentID != "" {
+		_ = s.pool.QueryRow(c.Request().Context(), "SELECT channel_id::text FROM chat_messages WHERE id = $1::uuid", parentID).Scan(&channelID)
+	}
 	if channelID == "" {
 		return problem(c, http.StatusBadRequest, "chat.channel_required", "Channel required", "channelId query param is required")
 	}

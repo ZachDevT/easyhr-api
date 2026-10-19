@@ -30,7 +30,20 @@ const (
 	MaxPageLimit      = 100
 )
 
-var mentionRegex = regexp.MustCompile(`@([\w.-]+)`)
+var (
+	mentionRegex  = regexp.MustCompile(`@([\w.-]+)`)
+	uuidRegex     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	channelSlugRe = regexp.MustCompile(`[^a-z0-9-]+`)
+)
+
+func slugifyChannelName(name string) string {
+	slug := strings.ToLower(strings.TrimSpace(name))
+	slug = strings.ReplaceAll(slug, " ", "-")
+	slug = strings.ReplaceAll(slug, "_", "-")
+	slug = channelSlugRe.ReplaceAllString(slug, "")
+	slug = strings.Trim(slug, "-")
+	return slug
+}
 
 type Service struct {
 	pool          *pgxpool.Pool
@@ -80,26 +93,45 @@ func (s *Service) InvalidateAuthCache(orgID, channelID string) {
 
 // AuthorizeChannel verifies if an employee is allowed to participate in or view a channel.
 func (s *Service) AuthorizeChannel(ctx context.Context, orgID, channelID, employeeID string, isAdmin bool) bool {
-	if orgID == "" || channelID == "" || employeeID == "" {
+	if orgID == "" || channelID == "" {
 		return false
 	}
-	cacheKey := orgID + ":" + channelID + ":" + employeeID
+	cacheKey := orgID + ":" + channelID + ":" + employeeID + fmt.Sprintf(":%t", isAdmin)
 	if val, ok := s.authCache.Load(cacheKey); ok {
 		return val.(bool)
 	}
 
+	var realChannelID string
 	var isPrivate bool
 	var channelType string
 	var deptRestricted bool
 	var deptName *string
+	var chName string
 	err := s.pool.QueryRow(ctx, `
-		SELECT is_private, channel_type, department_restricted, department_name
+		SELECT id::text, is_private, channel_type, department_restricted, department_name, name
 		FROM chat_channels
-		WHERE organization_id = $1::uuid AND id = $2::uuid
-	`, orgID, channelID).Scan(&isPrivate, &channelType, &deptRestricted, &deptName)
+		WHERE organization_id = $1::uuid 
+		  AND (
+		      (CASE WHEN $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN id = $2::uuid ELSE false END)
+		      OR lower(name) = lower($2)
+		      OR lower(name) = replace(lower($2), 'ch-', '')
+		  )
+		LIMIT 1
+	`, orgID, channelID).Scan(&realChannelID, &isPrivate, &channelType, &deptRestricted, &deptName, &chName)
 	if err != nil {
-		s.authCache.Store(cacheKey, false)
 		return false
+	}
+
+	// General and announcements channels are accessible to all workspace employees
+	if strings.EqualFold(chName, "general") || strings.EqualFold(chName, "announcements") {
+		s.authCache.Store(cacheKey, true)
+		return true
+	}
+
+	// Admins and Company Owners have access to all non-DM channels (public, department, and private)
+	if isAdmin {
+		s.authCache.Store(cacheKey, true)
+		return true
 	}
 
 	// DMs require explicit membership
@@ -107,46 +139,50 @@ func (s *Service) AuthorizeChannel(ctx context.Context, orgID, channelID, employ
 		var memberCount int
 		_ = s.pool.QueryRow(ctx, `
 			SELECT COUNT(*) FROM chat_channel_members
-			WHERE organization_id = $1::uuid AND channel_id = $2::uuid AND employee_id = $3::uuid
-		`, orgID, channelID, employeeID).Scan(&memberCount)
+			WHERE organization_id = $1::uuid AND channel_id = $2::uuid 
+			  AND ($3 = '' OR employee_id::text = $3 OR user_id::text = $3)
+		`, orgID, realChannelID, employeeID).Scan(&memberCount)
 		allowed := memberCount > 0
-		s.authCache.Store(cacheKey, allowed)
+		if allowed {
+			s.authCache.Store(cacheKey, true)
+		}
 		return allowed
 	}
 
-	// Admins have access to non-DM channels
-	if isAdmin {
-		s.authCache.Store(cacheKey, true)
-		return true
-	}
-
-	// Private channels require explicit membership
+	// Private channels require explicit membership or matching department
 	if isPrivate {
 		var memberCount int
 		_ = s.pool.QueryRow(ctx, `
 			SELECT COUNT(*) FROM chat_channel_members
-			WHERE organization_id = $1::uuid AND channel_id = $2::uuid AND employee_id = $3::uuid
-		`, orgID, channelID, employeeID).Scan(&memberCount)
-		allowed := memberCount > 0
-		s.authCache.Store(cacheKey, allowed)
-		return allowed
+			WHERE organization_id = $1::uuid AND channel_id = $2::uuid 
+			  AND ($3 = '' OR employee_id::text = $3 OR user_id::text = $3)
+		`, orgID, realChannelID, employeeID).Scan(&memberCount)
+		if memberCount > 0 {
+			s.authCache.Store(cacheKey, true)
+			return true
+		}
+
+		if deptRestricted && deptName != nil && *deptName != "" {
+			var empDept string
+			_ = s.pool.QueryRow(ctx, `
+				SELECT COALESCE(d.name, '') 
+				FROM employees e
+				LEFT JOIN employment_assignments a ON a.employee_id = e.id AND a.effective_to IS NULL
+				LEFT JOIN departments d ON d.id = COALESCE(a.department_id, e.department_id)
+				WHERE e.organization_id = $1::uuid 
+				  AND (e.id::text = $2 OR e.user_id::text = $2)
+				LIMIT 1
+			`, orgID, employeeID).Scan(&empDept)
+			if strings.EqualFold(empDept, *deptName) {
+				s.authCache.Store(cacheKey, true)
+				return true
+			}
+		}
+
+		return false
 	}
 
-	// Department restricted public channels
-	if deptRestricted && deptName != nil && *deptName != "" {
-		var empDept string
-		_ = s.pool.QueryRow(ctx, `
-			SELECT COALESCE(d.name, '') 
-			FROM employees e
-			LEFT JOIN employment_assignments a ON a.employee_id = e.id AND a.effective_to IS NULL
-			LEFT JOIN departments d ON d.id = a.department_id
-			WHERE e.organization_id = $1::uuid AND e.id = $2::uuid
-		`, orgID, employeeID).Scan(&empDept)
-		allowed := strings.EqualFold(empDept, *deptName)
-		s.authCache.Store(cacheKey, allowed)
-		return allowed
-	}
-
+	// All other non-private channels in the workspace (including department channels) are open to all organization members
 	s.authCache.Store(cacheKey, true)
 	return true
 }
@@ -156,25 +192,43 @@ func (s *Service) ResolveActor(ctx context.Context, principal identity.Principal
 		OrganizationID: principal.OrganizationID,
 		UserID:         principal.UserID,
 		MembershipID:   principal.MembershipID,
-		IsAdmin:        principal.HasPermission("workspace.admin") || principal.HasPermission("people.manage") || principal.HasPermission("organization.owner"),
 	}
 
-	var firstName, lastName, avatarURL, roleName string
+	var firstName, lastName, avatarURL string
 	_ = s.pool.QueryRow(ctx, `
 		SELECT first_name, last_name, COALESCE(avatar_url, '')
 		FROM users WHERE id = $1
 	`, principal.UserID).Scan(&firstName, &lastName, &avatarURL)
 
+	var roleKey, roleName string
 	_ = s.pool.QueryRow(ctx, `
-		SELECT COALESCE(r.display_name, 'Member')
+		SELECT COALESCE(r.key, ''), COALESCE(r.display_name, 'Member')
 		FROM membership_roles mr
 		JOIN roles r ON r.id = mr.role_id
 		WHERE mr.membership_id = $1
 		LIMIT 1
-	`, principal.MembershipID).Scan(&roleName)
+	`, principal.MembershipID).Scan(&roleKey, &roleName)
 	if roleName == "" {
 		roleName = "Member"
 	}
+
+	roleLower := strings.ToLower(roleName)
+	keyLower := strings.ToLower(roleKey)
+	actor.IsAdmin = principal.HasPermission("chat:manage_channels") ||
+		principal.HasPermission("organization:manage") ||
+		principal.HasPermission("memberships:manage") ||
+		principal.HasPermission("employees:manage") ||
+		principal.HasPermission("workspace.admin") ||
+		principal.HasPermission("people.manage") ||
+		principal.HasPermission("organization.owner") ||
+		strings.Contains(roleLower, "owner") ||
+		strings.Contains(roleLower, "admin") ||
+		strings.Contains(roleLower, "hr") ||
+		strings.Contains(roleLower, "manager") ||
+		strings.Contains(keyLower, "owner") ||
+		strings.Contains(keyLower, "admin") ||
+		strings.Contains(keyLower, "hr") ||
+		strings.Contains(keyLower, "manager")
 
 	actor.FullName = strings.TrimSpace(firstName + " " + lastName)
 	if actor.FullName == "" {
@@ -199,24 +253,34 @@ func (s *Service) ResolveActor(ctx context.Context, principal identity.Principal
 	`, principal.OrganizationID, principal.UserID).Scan(&empID, &empDept, &empJobTitle)
 
 	if err != nil || empID == "" {
-		newEmpID := newUUID()
-		email := ""
-		_ = s.pool.QueryRow(ctx, "SELECT email FROM users WHERE id = $1::uuid", principal.UserID).Scan(&email)
-		if email == "" {
-			email = principal.UserID + "@easyhr.local"
-		}
-		empNum := "EMP-" + newEmpID[:8]
-		_, insertErr := s.pool.Exec(ctx, `
-			INSERT INTO employees (id, organization_id, user_id, employee_number, first_name, last_name, work_email, status, hired_on)
-			VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, 'active', CURRENT_DATE)
-			ON CONFLICT (id) DO NOTHING
-		`, newEmpID, principal.OrganizationID, principal.UserID, empNum, firstName, lastName, email)
-		if insertErr == nil {
-			empID = newEmpID
+		_ = s.pool.QueryRow(ctx, `SELECT id::text FROM employees WHERE user_id = $1::uuid LIMIT 1`, principal.UserID).Scan(&empID)
+		if empID == "" {
+			newEmpID := newUUID()
+			email := ""
+			_ = s.pool.QueryRow(ctx, "SELECT email FROM users WHERE id = $1::uuid", principal.UserID).Scan(&email)
+			if email == "" {
+				email = fmt.Sprintf("user-%s@easyhr.local", principal.UserID[:8])
+			}
+			empNum := "EMP-" + newEmpID[:8]
+			_, insertErr := s.pool.Exec(ctx, `
+				INSERT INTO employees (id, organization_id, user_id, employee_number, first_name, last_name, work_email, status, hired_on)
+				VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, 'active', CURRENT_DATE)
+				ON CONFLICT DO NOTHING
+			`, newEmpID, principal.OrganizationID, principal.UserID, empNum, firstName, lastName, email)
+			if insertErr != nil {
+				uniqueEmail := fmt.Sprintf("%s+%s@easyhr.local", email, newEmpID[:6])
+				_, _ = s.pool.Exec(ctx, `
+					INSERT INTO employees (id, organization_id, employee_number, first_name, last_name, work_email, status, hired_on)
+					VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, 'active', CURRENT_DATE)
+					ON CONFLICT DO NOTHING
+				`, newEmpID, principal.OrganizationID, empNum, firstName, lastName, uniqueEmail)
+			}
+			_ = s.pool.QueryRow(ctx, `SELECT id::text FROM employees WHERE id = $1::uuid`, newEmpID).Scan(&empID)
+			if empID == "" {
+				_ = s.pool.QueryRow(ctx, `SELECT id::text FROM employees WHERE organization_id = $1::uuid LIMIT 1`, principal.OrganizationID).Scan(&empID)
+			}
 			empDept = "General"
 			empJobTitle = roleName
-		} else {
-			empID = principal.UserID
 		}
 	} else if principal.UserID != "" {
 		_, _ = s.pool.Exec(ctx, "UPDATE employees SET user_id = $1::uuid WHERE id = $2::uuid AND user_id IS NULL", principal.UserID, empID)
@@ -234,25 +298,11 @@ func (s *Service) ResolveActor(ctx context.Context, principal identity.Principal
 }
 
 func (s *Service) EnsureDefaultChannels(ctx context.Context, orgID, creatorID string) error {
-	var count int
-	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM chat_channels WHERE organization_id = $1::uuid`, orgID).Scan(&count)
-	if err != nil || count > 0 {
-		return err
+	if orgID == "" {
+		return nil
 	}
 
-	defaultChannels := []struct {
-		Name        string
-		Description string
-		Topic       string
-		Dept        string
-	}{
-		{"general", "Company-wide announcements and general discussion", "Welcome to EasyHR Workspace Chat!", ""},
-		{"announcements", "Official updates from HR and leadership", "Stay up to date with company news", ""},
-		{"random", "Non-work banter, water cooler chats, and fun", "Jokes, hobbies, and random discoveries", ""},
-		{"dev-talk", "Engineering discussions, releases, and tech syncs", "Product architecture & code reviews", "Engineering"},
-		{"design-team", "UI/UX, design reviews, design system updates", "Creative discussions & mockups", "Design"},
-	}
-
+	// 1. Fetch all employees in this organization
 	rows, err := s.pool.Query(ctx, `SELECT id::text, user_id::text FROM employees WHERE organization_id = $1::uuid`, orgID)
 	if err != nil {
 		return err
@@ -270,28 +320,177 @@ func (s *Service) EnsureDefaultChannels(ctx context.Context, orgID, creatorID st
 	}
 	rows.Close()
 
-	for _, dc := range defaultChannels {
-		chID := newUUID()
-		deptRestricted := dc.Dept != ""
-		_, err := s.pool.Exec(ctx, `
+	// 2. Fetch admin / HR / owner employees
+	adminEmpIDs := make(map[string]bool)
+	adminRows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT e.id::text
+		FROM employees e
+		JOIN memberships m ON m.organization_id = e.organization_id AND (m.user_id = e.user_id OR LOWER(m.user_id::text) = LOWER(e.user_id::text))
+		JOIN membership_roles mr ON mr.membership_id = m.id
+		JOIN roles r ON r.id = mr.role_id
+		WHERE e.organization_id = $1::uuid
+		  AND (
+		      r.key IN ('company_owner', 'admin', 'hr_manager', 'hr_admin', 'workspace_admin')
+		      OR r.display_name ILIKE '%owner%'
+		      OR r.display_name ILIKE '%admin%'
+		      OR r.display_name ILIKE '%hr%'
+		      OR r.display_name ILIKE '%manager%'
+		  )
+	`, orgID)
+	if err == nil {
+		for adminRows.Next() {
+			var aID string
+			if err := adminRows.Scan(&aID); err == nil && aID != "" {
+				adminEmpIDs[aID] = true
+			}
+		}
+		adminRows.Close()
+	}
+
+	// 3. Ensure #general channel exists
+	var genID string
+	err = s.pool.QueryRow(ctx, `
+		SELECT id::text FROM chat_channels 
+		WHERE organization_id = $1::uuid AND lower(name) = 'general'
+		LIMIT 1
+	`, orgID).Scan(&genID)
+	if err != nil || genID == "" {
+		genID = newUUID()
+		_, _ = s.pool.Exec(ctx, `
 			INSERT INTO chat_channels (
 				id, organization_id, name, channel_type, topic, description,
 				is_private, department_restricted, department_name, created_by_name
 			) VALUES (
-				$1::uuid, $2::uuid, $3, 'channel', $4, $5,
-				false, $6, NULLIF($7, ''), 'EasyHR System'
+				$1::uuid, $2::uuid, 'general', 'channel', 
+				'Welcome to EasyHR Workspace Chat!', 
+				'Company-wide announcements and general discussion',
+				false, false, NULL, 'EasyHR System'
 			) ON CONFLICT DO NOTHING
-		`, chID, orgID, dc.Name, dc.Topic, dc.Description, deptRestricted, dc.Dept)
-		if err != nil {
-			continue
-		}
+		`, genID, orgID)
+	}
 
-		for _, e := range emps {
-			_, _ = s.pool.Exec(ctx, `
-				INSERT INTO chat_channel_members (channel_id, organization_id, employee_id, user_id, role)
-				VALUES ($1::uuid, $2::uuid, $3::uuid, NULLIF($4, '')::uuid, 'member')
-				ON CONFLICT DO NOTHING
-			`, chID, orgID, e.empID, e.userID)
+	// 4. Ensure #announcements channel exists
+	var annID string
+	err = s.pool.QueryRow(ctx, `
+		SELECT id::text FROM chat_channels 
+		WHERE organization_id = $1::uuid AND lower(name) = 'announcements'
+		LIMIT 1
+	`, orgID).Scan(&annID)
+	if err != nil || annID == "" {
+		annID = newUUID()
+		_, _ = s.pool.Exec(ctx, `
+			INSERT INTO chat_channels (
+				id, organization_id, name, channel_type, topic, description,
+				is_private, department_restricted, department_name, created_by_name
+			) VALUES (
+				$1::uuid, $2::uuid, 'announcements', 'channel', 
+				'Official updates from HR and leadership', 
+				'Official updates from HR and leadership. Only HR and Admins can post.',
+				false, false, NULL, 'EasyHR System'
+			) ON CONFLICT DO NOTHING
+		`, annID, orgID)
+	}
+
+	// Add all employees to #general and #announcements
+	for _, chID := range []string{genID, annID} {
+		if chID != "" {
+			for _, e := range emps {
+				role := "member"
+				if adminEmpIDs[e.empID] {
+					role = "admin"
+				}
+				_, _ = s.pool.Exec(ctx, `
+					INSERT INTO chat_channel_members (channel_id, organization_id, employee_id, user_id, role)
+					VALUES ($1::uuid, $2::uuid, $3::uuid, NULLIF($4, '')::uuid, $5)
+					ON CONFLICT DO NOTHING
+				`, chID, orgID, e.empID, e.userID, role)
+			}
+		}
+	}
+
+	// 5. Dynamic Department Channels
+	deptRows, err := s.pool.Query(ctx, `
+		SELECT id::text, name 
+		FROM departments 
+		WHERE organization_id = $1::uuid AND status = 'active'
+		ORDER BY name ASC
+	`, orgID)
+	if err == nil {
+		type deptInfo struct {
+			id   string
+			name string
+		}
+		var depts []deptInfo
+		for deptRows.Next() {
+			var d deptInfo
+			if err := deptRows.Scan(&d.id, &d.name); err == nil && d.name != "" {
+				depts = append(depts, d)
+			}
+		}
+		deptRows.Close()
+
+		for _, d := range depts {
+			slug := slugifyChannelName(d.name)
+			if slug == "" {
+				slug = "dept-" + d.id[:8]
+			}
+
+			var chID string
+			err := s.pool.QueryRow(ctx, `
+				SELECT id::text FROM chat_channels
+				WHERE organization_id = $1::uuid AND (lower(name) = lower($2) OR department_name = $3)
+				LIMIT 1
+			`, orgID, slug, d.name).Scan(&chID)
+
+			if err != nil || chID == "" {
+				chID = newUUID()
+				_, _ = s.pool.Exec(ctx, `
+					INSERT INTO chat_channels (
+						id, organization_id, name, channel_type, topic, description,
+						is_private, department_restricted, department_name, created_by_name
+					) VALUES (
+						$1::uuid, $2::uuid, $3, 'channel',
+						$4, $5,
+						false, true, $6, 'EasyHR System'
+					) ON CONFLICT DO NOTHING
+				`, chID, orgID, slug,
+					fmt.Sprintf("%s department channel", d.name),
+					fmt.Sprintf("Discussions, updates, and collaboration for the %s team", d.name),
+					d.name)
+			}
+
+			// Add department employees
+			depEmps, err := s.pool.Query(ctx, `
+				SELECT e.id::text, e.user_id::text
+				FROM employees e
+				LEFT JOIN employment_assignments a ON a.employee_id = e.id AND a.effective_to IS NULL
+				WHERE e.organization_id = $1::uuid 
+				  AND (a.department_id = $2::uuid)
+			`, orgID, d.id)
+			if err == nil {
+				for depEmps.Next() {
+					var e empRef
+					if err := depEmps.Scan(&e.empID, &e.userID); err == nil {
+						_, _ = s.pool.Exec(ctx, `
+							INSERT INTO chat_channel_members (channel_id, organization_id, employee_id, user_id, role)
+							VALUES ($1::uuid, $2::uuid, $3::uuid, NULLIF($4, '')::uuid, 'member')
+							ON CONFLICT DO NOTHING
+						`, chID, orgID, e.empID, e.userID)
+					}
+				}
+				depEmps.Close()
+			}
+
+			// Also ensure HR Admins and Company Owners are added to each department channel
+			for _, e := range emps {
+				if adminEmpIDs[e.empID] {
+					_, _ = s.pool.Exec(ctx, `
+						INSERT INTO chat_channel_members (channel_id, organization_id, employee_id, user_id, role)
+						VALUES ($1::uuid, $2::uuid, $3::uuid, NULLIF($4, '')::uuid, 'admin')
+						ON CONFLICT DO NOTHING
+					`, chID, orgID, e.empID, e.userID)
+				}
+			}
 		}
 	}
 
@@ -446,6 +645,14 @@ func (s *Service) CreateChannel(ctx context.Context, actor Actor, in CreateChann
 	}
 	defer tx.Rollback(ctx)
 
+	var validActorUserID, validActorEmpID string
+	if uuidRegex.MatchString(actor.UserID) {
+		validActorUserID = actor.UserID
+	}
+	if uuidRegex.MatchString(actor.EmployeeID) {
+		validActorEmpID = actor.EmployeeID
+	}
+
 	_, err = tx.Exec(ctx, `
 		INSERT INTO chat_channels (
 			id, organization_id, name, channel_type, topic, description,
@@ -460,15 +667,18 @@ func (s *Service) CreateChannel(ctx context.Context, actor Actor, in CreateChann
 		)
 	`, chID, actor.OrganizationID, name, channelType, in.Topic, in.Description,
 		in.IsPrivate, deptRestricted, in.DepartmentRestriction,
-		actor.UserID, actor.EmployeeID, actor.FullName, now)
+		validActorUserID, validActorEmpID, actor.FullName, now)
 	if err != nil {
 		return Channel{}, fmt.Errorf("create channel failed: %w", err)
 	}
 
-	membersToInsert := map[string]bool{actor.EmployeeID: true}
+	membersToInsert := make(map[string]bool)
+	if validActorEmpID != "" {
+		membersToInsert[validActorEmpID] = true
+	}
 	for _, mid := range in.MemberIDs {
 		mid = strings.TrimSpace(mid)
-		if mid != "" {
+		if mid != "" && uuidRegex.MatchString(mid) {
 			membersToInsert[mid] = true
 		}
 	}
@@ -476,7 +686,7 @@ func (s *Service) CreateChannel(ctx context.Context, actor Actor, in CreateChann
 	memberIDsSlice := make([]string, 0, len(membersToInsert))
 	for mid := range membersToInsert {
 		role := "member"
-		if mid == actor.EmployeeID {
+		if mid == validActorEmpID {
 			role = "admin"
 		}
 		_, _ = tx.Exec(ctx, `
@@ -1055,6 +1265,21 @@ func (s *Service) ListMessages(ctx context.Context, actor Actor, filter ListMess
 		return MessagePage{}, ErrForbidden
 	}
 
+	var realChannelID string
+	err := s.pool.QueryRow(ctx, `
+		SELECT id::text FROM chat_channels
+		WHERE organization_id = $1::uuid 
+		  AND (
+		      (CASE WHEN $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN id = $2::uuid ELSE false END)
+		      OR lower(name) = lower($2)
+		      OR lower(name) = replace(lower($2), 'ch-', '')
+		  )
+		LIMIT 1
+	`, actor.OrganizationID, filter.ChannelID).Scan(&realChannelID)
+	if err == nil && realChannelID != "" {
+		filter.ChannelID = realChannelID
+	}
+
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = DefaultPageLimit
@@ -1072,7 +1297,7 @@ func (s *Service) ListMessages(ctx context.Context, actor Actor, filter ListMess
 			m.channel_id::text,
 			COALESCE(m.sender_employee_id::text, m.sender_user_id::text, ''),
 			m.sender_name,
-			m.sender_avatar,
+			COALESCE(NULLIF(m.sender_avatar, ''), u.avatar_url, ''),
 			m.sender_role,
 			m.content,
 			m.created_at,
@@ -1084,7 +1309,10 @@ func (s *Service) ListMessages(ctx context.Context, actor Actor, filter ListMess
 			m.is_pinned,
 			(s.message_id IS NOT NULL) AS is_saved
 		FROM chat_messages m
-		LEFT JOIN chat_message_saves s ON s.message_id = m.id AND s.employee_id = $3::uuid
+		LEFT JOIN users u ON u.id = COALESCE(m.sender_user_id, (SELECT user_id FROM employees WHERE id = m.sender_employee_id))
+		LEFT JOIN chat_message_saves s ON s.message_id = m.id AND s.employee_id = (
+			CASE WHEN $3 <> '' AND $3 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN $3::uuid ELSE NULL END
+		)
 		WHERE m.organization_id = $1::uuid 
 		  AND m.channel_id = $2::uuid
 	`)
@@ -1175,13 +1403,28 @@ func (s *Service) GetThreadReplies(ctx context.Context, actor Actor, channelID, 
 		return nil, ErrForbidden
 	}
 
+	var realChannelID string
+	err := s.pool.QueryRow(ctx, `
+		SELECT id::text FROM chat_channels
+		WHERE organization_id = $1::uuid 
+		  AND (
+		      (CASE WHEN $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN id = $2::uuid ELSE false END)
+		      OR lower(name) = lower($2)
+		      OR lower(name) = replace(lower($2), 'ch-', '')
+		  )
+		LIMIT 1
+	`, actor.OrganizationID, channelID).Scan(&realChannelID)
+	if err == nil && realChannelID != "" {
+		channelID = realChannelID
+	}
+
 	query := `
 		SELECT 
 			m.id::text,
 			m.channel_id::text,
 			COALESCE(m.sender_employee_id::text, m.sender_user_id::text, ''),
 			m.sender_name,
-			m.sender_avatar,
+			COALESCE(NULLIF(m.sender_avatar, ''), u.avatar_url, ''),
 			m.sender_role,
 			m.content,
 			m.created_at,
@@ -1193,7 +1436,10 @@ func (s *Service) GetThreadReplies(ctx context.Context, actor Actor, channelID, 
 			m.is_pinned,
 			(s.message_id IS NOT NULL) AS is_saved
 		FROM chat_messages m
-		LEFT JOIN chat_message_saves s ON s.message_id = m.id AND s.employee_id = $3::uuid
+		LEFT JOIN users u ON u.id = COALESCE(m.sender_user_id, (SELECT user_id FROM employees WHERE id = m.sender_employee_id))
+		LEFT JOIN chat_message_saves s ON s.message_id = m.id AND s.employee_id = (
+			CASE WHEN $3 <> '' AND $3 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN $3::uuid ELSE NULL END
+		)
 		WHERE m.organization_id = $1::uuid 
 		  AND m.channel_id = $2::uuid
 		  AND m.parent_message_id = $4::uuid
@@ -1369,16 +1615,31 @@ func (s *Service) SendMessage(ctx context.Context, actor Actor, in SendMessageIn
 		return Message{}, ErrForbidden
 	}
 
+	var realChannelID string
 	var isArchived bool
+	var chName string
 	err := s.pool.QueryRow(ctx, `
-		SELECT is_archived FROM chat_channels
-		WHERE organization_id = $1::uuid AND id = $2::uuid
-	`, actor.OrganizationID, in.ChannelID).Scan(&isArchived)
+		SELECT id::text, is_archived, name FROM chat_channels
+		WHERE organization_id = $1::uuid 
+		  AND (
+		      (CASE WHEN $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN id = $2::uuid ELSE false END)
+		      OR lower(name) = lower($2)
+		      OR lower(name) = replace(lower($2), 'ch-', '')
+		  )
+		LIMIT 1
+	`, actor.OrganizationID, in.ChannelID).Scan(&realChannelID, &isArchived, &chName)
 	if err != nil {
 		return Message{}, ErrNotFound
 	}
+	in.ChannelID = realChannelID
+
 	if isArchived {
 		return Message{}, ErrChannelArchived
+	}
+
+	// Announcements restriction: only HR and Admins can post in #announcements
+	if strings.EqualFold(chName, "announcements") && !actor.IsAdmin {
+		return Message{}, fmt.Errorf("%w: only HR and Administrators can post in #announcements", ErrForbidden)
 	}
 
 	// Idempotency: return existing message if clientMsgId was already sent
@@ -1386,7 +1647,12 @@ func (s *Service) SendMessage(ctx context.Context, actor Actor, in SendMessageIn
 		var existingID string
 		_ = s.pool.QueryRow(ctx, `
 			SELECT id::text FROM chat_messages
-			WHERE organization_id = $1::uuid AND channel_id = $2::uuid AND sender_employee_id = $3::uuid AND client_msg_id = $4
+			WHERE organization_id = $1::uuid AND channel_id = $2::uuid 
+			  AND (
+			      sender_employee_id = (CASE WHEN $3 <> '' AND $3 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN $3::uuid ELSE NULL END)
+			      OR sender_user_id = (CASE WHEN $3 <> '' AND $3 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN $3::uuid ELSE NULL END)
+			  )
+			  AND client_msg_id = $4
 		`, actor.OrganizationID, in.ChannelID, actor.EmployeeID, in.ClientMsgID).Scan(&existingID)
 		if existingID != "" {
 			page, err := s.ListMessages(ctx, actor, ListMessagesFilter{
@@ -1421,9 +1687,11 @@ func (s *Service) SendMessage(ctx context.Context, actor Actor, in SendMessageIn
 			sender_avatar, sender_role, content, client_msg_id,
 			created_at
 		) VALUES (
-			$1::uuid, $2::uuid, $3::uuid, NULLIF($4, '')::uuid,
-			NULLIF($5, '')::uuid, NULLIF($6, '')::uuid, $7,
-			$8, $9, $10, NULLIF($11, ''),
+			$1::uuid, $2::uuid, $3::uuid, 
+			CASE WHEN $4 <> '' AND $4 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN $4::uuid ELSE NULL END,
+			CASE WHEN $5 <> '' AND $5 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN $5::uuid ELSE NULL END,
+			CASE WHEN $6 <> '' AND $6 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN $6::uuid ELSE NULL END,
+			$7, $8, $9, $10, NULLIF($11, ''),
 			$12
 		)
 	`, msgID, actor.OrganizationID, in.ChannelID, in.ReplyToID,
@@ -1452,32 +1720,65 @@ func (s *Service) SendMessage(ctx context.Context, actor Actor, in SendMessageIn
 
 	// Attachments association
 	var attachments []Attachment
-	allAttachmentIDs := in.AttachmentIDs
-	for _, a := range in.Attachments {
-		if a.ID != "" {
-			allAttachmentIDs = append(allAttachmentIDs, a.ID)
+	var validAttachmentIDs []string
+	for _, id := range in.AttachmentIDs {
+		if uuidRegex.MatchString(id) {
+			validAttachmentIDs = append(validAttachmentIDs, id)
 		}
 	}
-	if len(allAttachmentIDs) > 0 {
+	for _, a := range in.Attachments {
+		if a.ID != "" && uuidRegex.MatchString(a.ID) {
+			validAttachmentIDs = append(validAttachmentIDs, a.ID)
+		} else if a.URL != "" {
+			customAttID := newUUID()
+			mediaType := a.Type
+			if mediaType == "" {
+				mediaType = classifyMimeType(a.MimeType, a.Name)
+			}
+			_, _ = tx.Exec(ctx, `
+				INSERT INTO chat_attachments (
+					id, organization_id, channel_id, message_id,
+					uploaded_by_employee_id, uploaded_by_user_id,
+					filename, media_type, content_type, size_bytes,
+					external_url, created_at
+				) VALUES (
+					$1::uuid, $2::uuid, $3::uuid, $4::uuid,
+					CASE WHEN $5 <> '' AND $5 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN $5::uuid ELSE NULL END,
+					CASE WHEN $6 <> '' AND $6 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN $6::uuid ELSE NULL END,
+					$7, $8, $9, $10,
+					$11, NOW()
+				)
+			`, customAttID, actor.OrganizationID, in.ChannelID, msgID,
+				actor.EmployeeID, actor.UserID,
+				a.Name, mediaType, a.MimeType, a.Size, a.URL)
+			validAttachmentIDs = append(validAttachmentIDs, customAttID)
+		}
+	}
+	if len(validAttachmentIDs) > 0 {
 		_, err = tx.Exec(ctx, `
 			UPDATE chat_attachments
 			SET message_id = $1::uuid
 			WHERE organization_id = $2::uuid AND id = ANY($3::uuid[])
-		`, msgID, actor.OrganizationID, allAttachmentIDs)
+		`, msgID, actor.OrganizationID, validAttachmentIDs)
 		if err != nil {
 			return Message{}, err
 		}
 
 		rows, err := tx.Query(ctx, `
-			SELECT id::text, filename, content_type, media_type, size_bytes
+			SELECT id::text, filename, content_type, media_type, size_bytes, COALESCE(external_url, '')
 			FROM chat_attachments
 			WHERE message_id = $1::uuid
 		`, msgID)
 		if err == nil {
 			for rows.Next() {
 				var att Attachment
-				if err := rows.Scan(&att.ID, &att.Name, &att.MimeType, &att.Type, &att.Size); err == nil {
-					att.URL = s.SignAttachmentURL(att.ID)
+				var extURL string
+				if err := rows.Scan(&att.ID, &att.Name, &att.MimeType, &att.Type, &att.Size, &extURL); err == nil {
+					if extURL != "" {
+						att.URL = extURL
+					} else {
+						att.URL = s.SignAttachmentURL(att.ID)
+					}
 					attachments = append(attachments, att)
 				}
 			}
@@ -1946,6 +2247,29 @@ func (s *Service) UploadAttachment(ctx context.Context, actor Actor, in UploadAt
 		return Attachment{}, ErrForbidden
 	}
 
+	var channelUUID *string
+	if in.ChannelID != "" {
+		var resolvedID string
+		err := s.pool.QueryRow(ctx, `
+			SELECT id::text FROM chat_channels 
+			WHERE organization_id = $1::uuid 
+			  AND (
+			      (CASE WHEN $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN id = $2::uuid ELSE false END)
+			      OR lower(name) = lower($2)
+			      OR lower(name) = replace(lower($2), 'ch-', '')
+			  )
+			LIMIT 1
+		`, actor.OrganizationID, in.ChannelID).Scan(&resolvedID)
+		if err == nil && resolvedID != "" {
+			channelUUID = &resolvedID
+		}
+	}
+
+	channelParam := ""
+	if channelUUID != nil {
+		channelParam = *channelUUID
+	}
+
 	mimeType := in.ContentType
 	if mimeType == "" || mimeType == "application/octet-stream" {
 		mimeType = http.DetectContentType(in.Data)
@@ -1976,11 +2300,14 @@ func (s *Service) UploadAttachment(ctx context.Context, actor Actor, in UploadAt
 			filename, media_type, content_type, size_bytes, size_label,
 			object_key, inline_data, created_at
 		) VALUES (
-			$1::uuid, $2::uuid, NULLIF($3, '')::uuid, NULLIF($4, '')::uuid, NULLIF($5, '')::uuid,
+			$1::uuid, $2::uuid, 
+			CASE WHEN $3 <> '' AND $3 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN $3::uuid ELSE NULL END,
+			CASE WHEN $4 <> '' AND $4 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN $4::uuid ELSE NULL END,
+			CASE WHEN $5 <> '' AND $5 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN $5::uuid ELSE NULL END,
 			$6, $7, $8, $9, $10,
 			$11, $12, NOW()
 		)
-	`, attID, actor.OrganizationID, in.ChannelID, actor.EmployeeID, actor.UserID,
+	`, attID, actor.OrganizationID, channelParam, actor.EmployeeID, actor.UserID,
 		in.FileName, fileType, mimeType, in.SizeBytes, sizeLabel,
 		objectKey, inlineData)
 	if err != nil {
@@ -2173,16 +2500,20 @@ func (s *Service) batchLoadMessageRelations(ctx context.Context, orgID string, m
 
 	// 1. Attachments
 	attRows, err := s.pool.Query(ctx, `
-		SELECT id::text, message_id::text, filename, media_type, content_type, size_bytes
+		SELECT id::text, message_id::text, filename, media_type, content_type, size_bytes, COALESCE(external_url, '')
 		FROM chat_attachments
 		WHERE organization_id = $1::uuid AND message_id = ANY($2::uuid[])
 	`, orgID, msgIDs)
 	if err == nil {
 		for attRows.Next() {
 			var att Attachment
-			var mid string
-			if err := attRows.Scan(&att.ID, &mid, &att.Name, &att.Type, &att.MimeType, &att.Size); err == nil {
-				att.URL = s.SignAttachmentURL(att.ID)
+			var mid, extURL string
+			if err := attRows.Scan(&att.ID, &mid, &att.Name, &att.Type, &att.MimeType, &att.Size, &extURL); err == nil {
+				if extURL != "" {
+					att.URL = extURL
+				} else {
+					att.URL = s.SignAttachmentURL(att.ID)
+				}
 				if m, ok := msgMap[mid]; ok {
 					m.Attachments = append(m.Attachments, att)
 				}
