@@ -733,8 +733,8 @@ func (s *Server) getChatAttachmentContent(c echo.Context) error {
 
 	c.Response().Header().Set("Content-Type", rec.MimeType)
 	c.Response().Header().Set("Content-Length", strconv.FormatInt(rec.SizeBytes, 10))
-	c.Response().Header().Set("Cache-Control", "private, max-age=86400")
-	if !strings.HasPrefix(rec.MimeType, "image/") && !strings.HasPrefix(rec.MimeType, "video/") && !strings.HasPrefix(rec.MimeType, "audio/") {
+	isDownload := c.QueryParam("download") == "1" || strings.EqualFold(c.QueryParam("download"), "true")
+	if isDownload || (!strings.HasPrefix(rec.MimeType, "image/") && !strings.HasPrefix(rec.MimeType, "video/") && !strings.HasPrefix(rec.MimeType, "audio/")) {
 		c.Response().Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", rec.FileName))
 	} else {
 		c.Response().Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", rec.FileName))

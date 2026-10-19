@@ -1731,11 +1731,42 @@ func (s *Service) SendMessage(ctx context.Context, actor Actor, in SendMessageIn
 			validAttachmentIDs = append(validAttachmentIDs, a.ID)
 		} else if a.URL != "" {
 			customAttID := newUUID()
-			mediaType := a.Type
-			if mediaType == "" {
+			mediaType := strings.ToLower(strings.TrimSpace(a.Type))
+			if mediaType != "image" && mediaType != "video" && mediaType != "file" {
 				mediaType = classifyMimeType(a.MimeType, a.Name)
 			}
-			_, _ = tx.Exec(ctx, `
+			fileName := strings.TrimSpace(a.Name)
+			if fileName == "" {
+				if mediaType == "image" {
+					fileName = "gif-" + customAttID[:8] + ".gif"
+				} else if mediaType == "video" {
+					fileName = "video-" + customAttID[:8] + ".mp4"
+				} else {
+					fileName = "file-" + customAttID[:8]
+				}
+			}
+			if len(fileName) > 255 {
+				fileName = fileName[:255]
+			}
+			contentType := strings.TrimSpace(a.MimeType)
+			if contentType == "" {
+				if mediaType == "image" {
+					contentType = "image/gif"
+				} else if mediaType == "video" {
+					contentType = "video/mp4"
+				} else {
+					contentType = "application/octet-stream"
+				}
+			}
+			sizeBytes := a.Size
+			if sizeBytes < 0 {
+				sizeBytes = 0
+			}
+			if sizeBytes > 52428800 {
+				sizeBytes = 52428800
+			}
+
+			_, err = tx.Exec(ctx, `
 				INSERT INTO chat_attachments (
 					id, organization_id, channel_id, message_id,
 					uploaded_by_employee_id, uploaded_by_user_id,
@@ -1750,7 +1781,10 @@ func (s *Service) SendMessage(ctx context.Context, actor Actor, in SendMessageIn
 				)
 			`, customAttID, actor.OrganizationID, in.ChannelID, msgID,
 				actor.EmployeeID, actor.UserID,
-				a.Name, mediaType, a.MimeType, a.Size, a.URL)
+				fileName, mediaType, contentType, sizeBytes, a.URL)
+			if err != nil {
+				return Message{}, fmt.Errorf("insert attachment failed: %w", err)
+			}
 			validAttachmentIDs = append(validAttachmentIDs, customAttID)
 		}
 	}
@@ -1822,14 +1856,6 @@ func (s *Service) SendMessage(ctx context.Context, actor Actor, in SendMessageIn
 		}
 	}
 
-	// Automatically update sender's last_read timestamp for this channel
-	_, _ = tx.Exec(ctx, `
-		INSERT INTO chat_channel_members (channel_id, organization_id, employee_id, user_id, last_read_message_id, last_read_at, unread_count)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, NULLIF($4, '')::uuid, $5::uuid, $6, 0)
-		ON CONFLICT (channel_id, employee_id)
-		DO UPDATE SET last_read_message_id = EXCLUDED.last_read_message_id, last_read_at = EXCLUDED.last_read_at, unread_count = 0
-	`, in.ChannelID, actor.OrganizationID, actor.EmployeeID, actor.UserID, msgID, now)
-
 	eventType := EventMessageCreated
 	if in.ReplyToID != "" {
 		eventType = EventThreadReplyCreated
@@ -1855,11 +1881,29 @@ func (s *Service) SendMessage(ctx context.Context, actor Actor, in SendMessageIn
 	payloadRaw, _ := json.Marshal(msg)
 	_, _ = tx.Exec(ctx, `
 		INSERT INTO chat_events (organization_id, channel_id, actor_employee_id, event_type, payload, created_at)
-		VALUES ($1::uuid, $2::uuid, NULLIF($3, '')::uuid, $4, $5, $6)
+		VALUES (
+			$1::uuid, $2::uuid, 
+			CASE WHEN $3 <> '' AND $3 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN $3::uuid ELSE NULL END, 
+			$4, $5, $6
+		)
 	`, actor.OrganizationID, in.ChannelID, actor.EmployeeID, eventType, payloadRaw, now)
 
 	if err := tx.Commit(ctx); err != nil {
 		return Message{}, err
+	}
+
+	// Update sender's last_read timestamp asynchronously on pool (outside tx to never block message creation)
+	if uuidRegex.MatchString(actor.EmployeeID) {
+		_, _ = s.pool.Exec(ctx, `
+			INSERT INTO chat_channel_members (channel_id, organization_id, employee_id, user_id, last_read_message_id, last_read_at, unread_count)
+			VALUES (
+				$1::uuid, $2::uuid, $3::uuid, 
+				CASE WHEN $4 <> '' AND $4 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN $4::uuid ELSE NULL END, 
+				$5::uuid, $6, 0
+			)
+			ON CONFLICT (channel_id, employee_id)
+			DO UPDATE SET last_read_message_id = EXCLUDED.last_read_message_id, last_read_at = EXCLUDED.last_read_at, unread_count = 0
+		`, in.ChannelID, actor.OrganizationID, actor.EmployeeID, actor.UserID, msgID, now)
 	}
 
 	s.hub.Publish(RealtimeEvent{
@@ -2270,14 +2314,22 @@ func (s *Service) UploadAttachment(ctx context.Context, actor Actor, in UploadAt
 		channelParam = *channelUUID
 	}
 
+	attID := newUUID()
+	fileName := strings.TrimSpace(in.FileName)
+	if fileName == "" {
+		fileName = "upload-" + attID[:8]
+	}
+	if len(fileName) > 255 {
+		fileName = fileName[:255]
+	}
+
 	mimeType := in.ContentType
 	if mimeType == "" || mimeType == "application/octet-stream" {
 		mimeType = http.DetectContentType(in.Data)
 	}
-	fileType := classifyMimeType(mimeType, in.FileName)
+	fileType := classifyMimeType(mimeType, fileName)
 
-	attID := newUUID()
-	objectKey := fmt.Sprintf("chat/%s/%s/%s", actor.OrganizationID, attID, in.FileName)
+	objectKey := fmt.Sprintf("chat/%s/%s/%s", actor.OrganizationID, attID, fileName)
 
 	var inlineData []byte
 	if s.storage != nil {
@@ -2308,7 +2360,7 @@ func (s *Service) UploadAttachment(ctx context.Context, actor Actor, in UploadAt
 			$11, $12, NOW()
 		)
 	`, attID, actor.OrganizationID, channelParam, actor.EmployeeID, actor.UserID,
-		in.FileName, fileType, mimeType, in.SizeBytes, sizeLabel,
+		fileName, fileType, mimeType, in.SizeBytes, sizeLabel,
 		objectKey, inlineData)
 	if err != nil {
 		return Attachment{}, fmt.Errorf("insert attachment failed: %w", err)
@@ -2316,7 +2368,7 @@ func (s *Service) UploadAttachment(ctx context.Context, actor Actor, in UploadAt
 
 	return Attachment{
 		ID:       attID,
-		Name:     in.FileName,
+		Name:     fileName,
 		URL:      s.SignAttachmentURL(attID),
 		Type:     fileType,
 		MimeType: mimeType,
@@ -2675,40 +2727,78 @@ func (s *Service) dispatchNotifications(actor Actor, channelID, msgID, content, 
 	type recipient struct {
 		userID     string
 		employeeID string
+		fullName   string
 		isMuted    bool
 		dnd        bool
 	}
 
-	var recipients []recipient
+	recipientsMap := make(map[string]recipient)
+
+	// 1. Fetch channel members
 	query := `
 		SELECT 
-			COALESCE(e.user_id::text, ''),
+			COALESCE(u.id::text, e.user_id::text, ''),
 			m.employee_id::text,
+			TRIM(CONCAT(e.first_name, ' ', e.last_name)),
 			m.is_muted,
 			(p.dnd_until IS NOT NULL AND p.dnd_until > NOW())
 		FROM chat_channel_members m
 		JOIN employees e ON e.id = m.employee_id
+		LEFT JOIN users u ON u.id = e.user_id OR LOWER(u.email) = LOWER(e.work_email)
 		LEFT JOIN chat_user_presence p ON p.employee_id = m.employee_id
 		WHERE m.organization_id = $1::uuid 
 		  AND m.channel_id = $2::uuid
-		  AND m.employee_id != $3::uuid
+		  AND (m.employee_id::text != $3 OR $3 = '')
 	`
 	rows, err := s.pool.Query(ctx, query, actor.OrganizationID, channelID, actor.EmployeeID)
-	if err != nil {
-		return
+	if err == nil {
+		for rows.Next() {
+			var r recipient
+			if err := rows.Scan(&r.userID, &r.employeeID, &r.fullName, &r.isMuted, &r.dnd); err == nil && r.userID != "" {
+				recipientsMap[r.userID] = r
+			}
+		}
+		rows.Close()
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		var r recipient
-		if err := rows.Scan(&r.userID, &r.employeeID, &r.isMuted, &r.dnd); err == nil && r.userID != "" {
-			recipients = append(recipients, r)
+	// 2. If mentions exist, also resolve mentioned employees across organization
+	for _, m := range mentions {
+		mLower := strings.ToLower(m)
+		if mLower == "channel" || mLower == "here" {
+			continue
+		}
+		empRows, err := s.pool.Query(ctx, `
+			SELECT 
+				COALESCE(u.id::text, e.user_id::text, ''),
+				e.id::text,
+				TRIM(CONCAT(e.first_name, ' ', e.last_name)),
+				false,
+				false
+			FROM employees e
+			LEFT JOIN users u ON u.id = e.user_id OR LOWER(u.email) = LOWER(e.work_email)
+			WHERE e.organization_id = $1::uuid
+			  AND (
+			      LOWER(e.first_name) = $2
+			      OR LOWER(e.last_name) = $2
+			      OR LOWER(CONCAT(e.first_name, e.last_name)) = $2
+			      OR LOWER(e.work_email) LIKE $2 || '%'
+			  )
+			  AND (e.id::text != $3 OR $3 = '')
+		`, actor.OrganizationID, mLower, actor.EmployeeID)
+		if err == nil {
+			for empRows.Next() {
+				var r recipient
+				if err := empRows.Scan(&r.userID, &r.employeeID, &r.fullName, &r.isMuted, &r.dnd); err == nil && r.userID != "" {
+					recipientsMap[r.userID] = r
+				}
+			}
+			empRows.Close()
 		}
 	}
 
 	isDM := chType == ChannelTypeDM || chType == ChannelTypeGroupDM
 
-	for _, rec := range recipients {
+	for _, rec := range recipientsMap {
 		if rec.isMuted || rec.dnd {
 			continue
 		}
@@ -2719,8 +2809,25 @@ func (s *Service) dispatchNotifications(actor Actor, channelID, msgID, content, 
 		}
 
 		shouldNotify := isDM
+
+		// Thread reply author notification
+		if replyToID != "" {
+			var parentSenderEmpID string
+			_ = s.pool.QueryRow(ctx, `
+				SELECT COALESCE(sender_employee_id::text, '') FROM chat_messages
+				WHERE id = $1::uuid
+			`, replyToID).Scan(&parentSenderEmpID)
+			if parentSenderEmpID == rec.employeeID {
+				shouldNotify = true
+				title = fmt.Sprintf("%s replied to your thread in #%s", actor.FullName, chName)
+			}
+		}
+
+		// Mention check against recipient's name
+		recNameLower := strings.ToLower(rec.fullName)
 		for _, m := range mentions {
-			if m == "channel" || m == "here" || strings.Contains(strings.ToLower(actor.FullName), m) {
+			mLower := strings.ToLower(m)
+			if mLower == "channel" || mLower == "here" || (recNameLower != "" && strings.Contains(recNameLower, mLower)) {
 				shouldNotify = true
 				title = fmt.Sprintf("%s mentioned you in #%s", actor.FullName, chName)
 				break
