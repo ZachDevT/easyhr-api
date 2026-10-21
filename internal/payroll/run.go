@@ -28,7 +28,7 @@ func (service *Service) InitiateRun(ctx context.Context, organizationID, actorUs
 	var config Configuration
 	err = service.pool.QueryRow(ctx, `SELECT id::text, country, currency, standard_monthly_minutes,organization_id::text FROM payroll_configurations WHERE organization_id = $1 LIMIT 1`, organizationID).Scan(&config.ID, &config.Country, &config.Currency, &config.StandardMonthlyMinutes, &config.OrganizationID)
 	if err != nil {
-		return Run{}, ErrNotFound
+		return Run{}, ErrConfigurationMissing
 	}
 
 	tx, err := service.pool.Begin(ctx)

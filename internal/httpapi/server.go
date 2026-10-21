@@ -403,6 +403,10 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/payroll/configurations", s.createPayrollConfiguration)
 		s.api.GET("/payroll/tax-rules", s.listPayrollTaxRules)
 		s.api.POST("/payroll/tax-rules", s.savePayrollTaxRule)
+		s.api.PATCH("/payroll/tax-rules/:ruleId", s.updatePayrollTaxRuleStatus)
+		s.api.DELETE("/payroll/tax-rules/:ruleId", s.deletePayrollTaxRule)
+		s.api.GET("/payroll/runs", s.listPayrollRuns)
+		s.api.DELETE("/payroll/runs/:runId", s.discardPayrollRun)
 		s.api.GET("/payroll/periods", s.listPayrollPeriods)
 		s.api.POST("/payroll/periods", s.createPayrollPeriod)
 		s.api.GET("/payroll/periods/:periodId/runs", s.listPayrollRunsForPeriod)
@@ -2256,8 +2260,21 @@ func (s *Server) createPayrollRun(c echo.Context) error {
 			return problem(c, http.StatusConflict, "payroll.compensation_missing", "Compensation setup incomplete", "Every active employee needs an effective compensation record before payroll can run")
 		}
 		if errors.Is(err, payroll.ErrUnsupportedJurisdiction) {
-			return problem(c, http.StatusUnprocessableEntity, "payroll.rules_unavailable", "Payroll rules unavailable", "Statutory payroll rules are not configured for this jurisdiction")
+			return problem(c, http.StatusUnprocessableEntity, "payroll.rules_unavailable", "Payroll rules unavailable", "Add at least one active tax or deduction for your payroll country before running payroll")
 		}
+		if errors.Is(err, payroll.ErrConfigurationMissing) {
+			return problem(c, http.StatusConflict, "payroll.configuration_required", "Payroll settings required", "Save your payroll country and currency in Settings before running payroll")
+		}
+		if errors.Is(err, payroll.ErrInvalidState) {
+			return problem(c, http.StatusConflict, "payroll.invalid_state", "Pay period already in progress", "This pay period already has a run. Approve or discard it first")
+		}
+		if errors.Is(err, payroll.ErrCompensationCurrencyMismatch) {
+			return problem(c, http.StatusConflict, "payroll.currency_mismatch", "Salary currency mismatch", "One or more salaries use a different currency than your payroll settings. Update those salaries and try again")
+		}
+		if errors.Is(err, payroll.ErrUnsupportedCompensation) {
+			return problem(c, http.StatusConflict, "payroll.unsupported_compensation", "Unsupported salary type", "Payroll currently supports monthly salaries only")
+		}
+		slog.Error("payroll run failed", "error", err)
 		return problem(c, http.StatusInternalServerError, "payroll.run_failed", "Internal server error", "Could not initiate payroll run")
 	}
 	return c.JSON(http.StatusOK, result)

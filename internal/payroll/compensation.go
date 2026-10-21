@@ -93,7 +93,7 @@ func (service *Service) CreateCompensation(ctx context.Context, organizationID, 
 		INSERT INTO compensation_records (employee_id, effective_date, currency, pay_frequency, base_amount_minor, pay_type, reason, created_by_user_id)
 		SELECT e.id, $3::date, $4, 'monthly', $5, 'salary', NULLIF($6, ''), $7
 		FROM employees e
-		WHERE e.id = $1 AND e.organization_id = $2 AND e.status = 'active'
+		WHERE e.id = $1 AND e.organization_id = $2 AND e.status IN ('active', 'leave', 'onboarding')
 		RETURNING id::text`, input.EmployeeID, organizationID, input.EffectiveDate, input.Currency, input.BaseAmountMinor, input.Reason, actorUserID).Scan(&item.ID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return CompensationRecord{}, ErrCompensationEmployeeNotFound
