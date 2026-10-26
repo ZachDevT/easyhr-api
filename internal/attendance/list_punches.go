@@ -36,8 +36,11 @@ func (service *Service) ListPunches(ctx context.Context, organizationID string, 
 	if input.EmployeeID == "" {
 		return PunchPage{}, fmt.Errorf("employeeId is required")
 	}
-	if input.Limit < 1 || input.Limit > 100 {
-		return PunchPage{}, fmt.Errorf("limit must be between 1 and 100")
+	if input.Limit < 1 {
+		input.Limit = 25
+	}
+	if input.Limit > 500 {
+		input.Limit = 500
 	}
 	from, to, err := parseDateRange(input.From, input.To)
 	if err != nil {

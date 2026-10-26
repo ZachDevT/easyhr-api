@@ -256,6 +256,8 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/employees", s.createEmployee)
 		s.api.GET("/employees/me", s.getMyEmployeeProfile)
 		s.api.PATCH("/employees/me/profile", s.updateMyPersonalProfile)
+		s.api.GET("/people/me", s.getMyEmployeeProfile)
+		s.api.PATCH("/people/me/profile", s.updateMyPersonalProfile)
 		s.api.POST("/employees/:employeeId/activate", s.activateEmployee)
 		s.api.GET("/employees/:employeeId/onboarding-link", s.getEmployeeOnboardingLink)
 		s.api.POST("/employees/:employeeId/onboarding-link", s.generateEmployeeOnboardingLink)
@@ -811,9 +813,14 @@ func (s *Server) listAttendancePunches(c echo.Context) error {
 	}
 	limit := 25
 	if raw := c.QueryParam("limit"); raw != "" {
-		limit, err = strconv.Atoi(raw)
-		if err != nil {
-			return problem(c, http.StatusUnprocessableEntity, "validation.invalid_limit", "Invalid limit", "limit must be an integer")
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			if parsed > 500 {
+				limit = 500
+			} else if parsed < 1 {
+				limit = 25
+			} else {
+				limit = parsed
+			}
 		}
 	}
 	result, err := s.attendance.ListPunches(c.Request().Context(), principal.OrganizationID, attendance.ListPunchesInput{EmployeeID: employeeID, From: c.QueryParam("from"), To: c.QueryParam("to"), Cursor: c.QueryParam("cursor"), Limit: limit})
@@ -996,7 +1003,17 @@ func (s *Server) listLeaveBalances(c echo.Context) error {
 	}
 	employeeID := strings.TrimSpace(c.QueryParam("employeeId"))
 	if employeeID == "" {
-		return problem(c, http.StatusUnprocessableEntity, "validation.employee_id_required", "Employee required", "employeeId is required")
+		_ = s.pool.QueryRow(c.Request().Context(), "SELECT id FROM employees WHERE user_id = $1 AND organization_id = $2", principal.UserID, principal.OrganizationID).Scan(&employeeID)
+	}
+	if employeeID == "" {
+		var userEmail string
+		_ = s.pool.QueryRow(c.Request().Context(), "SELECT email FROM users WHERE id = $1", principal.UserID).Scan(&userEmail)
+		if userEmail != "" {
+			_ = s.pool.QueryRow(c.Request().Context(), "SELECT id FROM employees WHERE (work_email ILIKE $1 OR personal_email ILIKE $1) AND organization_id = $2", userEmail, principal.OrganizationID).Scan(&employeeID)
+		}
+	}
+	if employeeID == "" {
+		return c.JSON(http.StatusOK, map[string]any{"data": []any{}})
 	}
 	isOwnEmployee, err := s.people.IsEmployeeUser(c.Request().Context(), principal.OrganizationID, employeeID, principal.UserID)
 	if err != nil {
