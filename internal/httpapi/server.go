@@ -257,6 +257,8 @@ func (s *Server) registerRoutes() {
 		s.api.GET("/employees/me", s.getMyEmployeeProfile)
 		s.api.PATCH("/employees/me/profile", s.updateMyPersonalProfile)
 		s.api.POST("/employees/:employeeId/activate", s.activateEmployee)
+		s.api.GET("/employees/:employeeId/onboarding-link", s.getEmployeeOnboardingLink)
+		s.api.POST("/employees/:employeeId/onboarding-link", s.generateEmployeeOnboardingLink)
 		s.api.GET("/onboarding/settings", s.getOnboardingSettings)
 		s.api.PUT("/onboarding/settings", s.updateOnboardingSettings)
 		s.api.GET("/onboarding/handbook-download-url", s.getOnboardingHandbookDownloadURL)
@@ -1623,13 +1625,19 @@ func (s *Server) sendOnboardingInvitation(c echo.Context) error {
 	}
 
 	var token string
+	var expiresAt time.Time
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err == nil {
 		token = hex.EncodeToString(tokenBytes)
-		expiresAt := time.Now().Add(7 * 24 * time.Hour)
+		expiresAt = time.Now().Add(7 * 24 * time.Hour)
 		var empIDParam any
 		if req.EmployeeID != "" {
 			empIDParam = req.EmployeeID
+			// Invalidate any older pending invitations for this employee so token is fresh
+			_, _ = s.pool.Exec(c.Request().Context(), `
+				UPDATE invitations SET status = 'revoked'
+				WHERE organization_id = $1 AND employee_id = $2::uuid AND status = 'pending'`,
+				principal.OrganizationID, req.EmployeeID)
 		}
 		_, errIns := s.pool.Exec(c.Request().Context(), `
 			INSERT INTO invitations (organization_id, employee_id, email, name, role, token, status, expires_at)
@@ -1667,7 +1675,147 @@ func (s *Server) sendOnboardingInvitation(c echo.Context) error {
 		return problem(c, http.StatusInternalServerError, "email.failed", "Failed to send email", err.Error())
 	}
 
-	return c.JSON(http.StatusOK, map[string]any{"sent": true, "recipient": req.Email})
+	res := map[string]any{
+		"sent":      true,
+		"recipient": req.Email,
+		"portalUrl": req.PortalURL,
+		"token":     token,
+	}
+	if !expiresAt.IsZero() {
+		res["expiresAt"] = expiresAt.Format(time.RFC3339)
+	}
+	return c.JSON(http.StatusOK, res)
+}
+
+func (s *Server) getEmployeeOnboardingLink(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	if !principal.HasPermission("employees:manage") && !principal.HasPermission("onboarding:initiate") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view onboarding links")
+	}
+
+	employeeID := c.Param("employeeId")
+	var token, inviteEmail, name string
+	var expiresAt time.Time
+	var subdomain string
+
+	err := s.pool.QueryRow(c.Request().Context(), `
+		SELECT i.token, i.email, i.name, i.expires_at, COALESCE(w.subdomain, '')
+		FROM invitations i
+		JOIN organizations o ON o.id = i.organization_id
+		LEFT JOIN workspaces w ON w.organization_id = o.id
+		WHERE i.organization_id = $1 AND i.employee_id = $2::uuid AND i.status = 'pending' AND i.expires_at > now()
+		ORDER BY i.created_at DESC LIMIT 1`, principal.OrganizationID, employeeID).Scan(&token, &inviteEmail, &name, &expiresAt, &subdomain)
+	if err != nil {
+		return problem(c, http.StatusNotFound, "invitation.not_found", "No active invitation found", "No unexpired pending invitation found for this employee")
+	}
+
+	var portalURL string
+	if subdomain != "" {
+		portalURL = fmt.Sprintf("https://%s.easyhr.pro/auth/accept-invite?token=%s&redirect_url=/my-onboarding", subdomain, token)
+	} else {
+		portalURL = fmt.Sprintf("https://easyhr.pro/auth/accept-invite?token=%s&redirect_url=/my-onboarding", token)
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"portalUrl": portalURL,
+		"token":     token,
+		"email":     inviteEmail,
+		"name":      name,
+		"expiresAt": expiresAt.Format(time.RFC3339),
+	})
+}
+
+func (s *Server) generateEmployeeOnboardingLink(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	if !principal.HasPermission("employees:manage") && !principal.HasPermission("onboarding:initiate") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage onboarding links")
+	}
+
+	employeeID := c.Param("employeeId")
+	var fName, lName, wEmail, pEmail, job string
+	var hiredOn time.Time
+	err := s.pool.QueryRow(c.Request().Context(), `
+		SELECT e.first_name, e.last_name, e.work_email, COALESCE(p.personal_email, ''), COALESCE(ea.job_title, ''), e.hired_on
+		FROM employees e
+		LEFT JOIN employee_personal_profiles p ON p.employee_id = e.id
+		LEFT JOIN employment_assignments ea ON ea.employee_id = e.id AND ea.effective_to IS NULL
+		WHERE e.id = $1::uuid AND e.organization_id = $2`, employeeID, principal.OrganizationID).Scan(&fName, &lName, &wEmail, &pEmail, &job, &hiredOn)
+	if err != nil {
+		return problem(c, http.StatusNotFound, "employee.not_found", "Employee not found", "Could not locate employee record")
+	}
+
+	destEmail := pEmail
+	if destEmail == "" {
+		destEmail = wEmail
+	}
+	name := strings.TrimSpace(fName + " " + lName)
+
+	var orgName, logoURL, brandColor, websiteURL, subdomain string
+	_ = s.pool.QueryRow(c.Request().Context(), `
+		SELECT o.name, COALESCE(w.logo_url, ''), COALESCE(w.brand_color, '#4F46E5'), COALESCE(lp.website_url, ''), COALESCE(w.subdomain, '')
+		FROM organizations o
+		LEFT JOIN workspaces w ON w.organization_id = o.id
+		LEFT JOIN organization_legal_profiles lp ON lp.organization_id = o.id
+		WHERE o.id = $1`, principal.OrganizationID).Scan(&orgName, &logoURL, &brandColor, &websiteURL, &subdomain)
+
+	// Invalidate previous pending invitations
+	_, _ = s.pool.Exec(c.Request().Context(), `
+		UPDATE invitations SET status = 'revoked'
+		WHERE organization_id = $1 AND employee_id = $2::uuid AND status = 'pending'`,
+		principal.OrganizationID, employeeID)
+
+	tokenBytes := make([]byte, 32)
+	_, _ = rand.Read(tokenBytes)
+	token := hex.EncodeToString(tokenBytes)
+	expiresAt := time.Now().Add(7 * 24 * time.Hour)
+
+	_, errIns := s.pool.Exec(c.Request().Context(), `
+		INSERT INTO invitations (organization_id, employee_id, email, name, role, token, status, expires_at)
+		VALUES ($1::uuid, $2::uuid, $3, $4, 'employee', $5, 'pending', $6)`,
+		principal.OrganizationID, employeeID, destEmail, name, token, expiresAt)
+	if errIns != nil {
+		return problem(c, http.StatusInternalServerError, "invitation.create_failed", "Failed to generate invitation", errIns.Error())
+	}
+
+	var portalURL string
+	if subdomain != "" {
+		portalURL = fmt.Sprintf("https://%s.easyhr.pro/auth/accept-invite?token=%s&redirect_url=/my-onboarding", subdomain, token)
+	} else {
+		portalURL = fmt.Sprintf("https://easyhr.pro/auth/accept-invite?token=%s&redirect_url=/my-onboarding", token)
+	}
+
+	var body struct {
+		SendEmail bool `json:"sendEmail"`
+	}
+	_ = c.Bind(&body)
+
+	emailSent := false
+	if body.SendEmail && destEmail != "" {
+		branding := email.BrandingInfo{
+			CompanyName: orgName,
+			LogoURL:     logoURL,
+			BrandColor:  brandColor,
+			WebsiteURL:  websiteURL,
+		}
+		formattedDate := hiredOn.Format("Jan 2, 2006")
+		_ = s.email.SendOnboardingInvitationWithBranding(c.Request().Context(), destEmail, name, job, formattedDate, portalURL, branding)
+		emailSent = true
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"portalUrl": portalURL,
+		"token":     token,
+		"email":     destEmail,
+		"name":      name,
+		"expiresAt": expiresAt.Format(time.RFC3339),
+		"emailSent": emailSent,
+	})
 }
 
 func (s *Server) dispatchInvitationForEmployee(ctx context.Context, organizationID, employeeID, destEmail, name, jobTitle, startDate string) error {
