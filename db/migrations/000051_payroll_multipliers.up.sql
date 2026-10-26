@@ -1,0 +1,3 @@
+ALTER TABLE payroll_configurations
+  ADD COLUMN IF NOT EXISTS overtime_multiplier NUMERIC(4, 2) NOT NULL DEFAULT 1.50,
+  ADD COLUMN IF NOT EXISTS holiday_multiplier NUMERIC(4, 2) NOT NULL DEFAULT 2.00;

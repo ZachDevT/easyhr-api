@@ -26,7 +26,7 @@ func (service *Service) InitiateRun(ctx context.Context, organizationID, actorUs
 
 	// Fetch Config
 	var config Configuration
-	err = service.pool.QueryRow(ctx, `SELECT id::text, country, currency, standard_monthly_minutes,organization_id::text FROM payroll_configurations WHERE organization_id = $1 LIMIT 1`, organizationID).Scan(&config.ID, &config.Country, &config.Currency, &config.StandardMonthlyMinutes, &config.OrganizationID)
+	err = service.pool.QueryRow(ctx, `SELECT id::text, country, currency, standard_monthly_minutes, COALESCE(overtime_multiplier, 1.50)::float8, COALESCE(holiday_multiplier, 2.00)::float8, organization_id::text FROM payroll_configurations WHERE organization_id = $1 LIMIT 1`, organizationID).Scan(&config.ID, &config.Country, &config.Currency, &config.StandardMonthlyMinutes, &config.OvertimeMultiplier, &config.HolidayMultiplier, &config.OrganizationID)
 	if err != nil {
 		return Run{}, ErrConfigurationMissing
 	}
