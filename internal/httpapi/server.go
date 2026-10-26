@@ -246,6 +246,8 @@ func (s *Server) registerRoutes() {
 		s.api.GET("/employees", s.listEmployees)
 		s.api.GET("/employees/:employeeId", s.getEmployee)
 		s.api.PATCH("/employees/:employeeId", s.updateEmployee)
+		s.api.PATCH("/employees/:employeeId/profile", s.updateEmployeePersonalProfile)
+		s.api.PUT("/employees/:employeeId/profile", s.updateEmployeePersonalProfile)
 		s.api.GET("/departments", s.listDepartments)
 		s.api.POST("/departments", s.createDepartment)
 		s.api.GET("/departments/:departmentId/positions", s.listDepartmentPositions)
@@ -1577,6 +1579,39 @@ func (s *Server) updateMyPersonalProfile(c echo.Context) error {
 		if input.HandbookSignedAt != nil && *input.HandbookSignedAt != "" {
 			_ = s.people.Activate(c.Request().Context(), principal.OrganizationID, empID)
 		}
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{"status": "success"})
+}
+
+func (s *Server) updateEmployeePersonalProfile(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
+	}
+	empID := c.Param("employeeId")
+	isSelf, _ := s.people.IsEmployeeUser(c.Request().Context(), principal.OrganizationID, empID, principal.UserID)
+	if !isSelf && !principal.HasPermission("employees:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to update this employee's profile")
+	}
+
+	var input people.PersonalProfile
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid request body", err.Error())
+	}
+
+	if input.FirstName != nil && *input.FirstName != "" {
+		_, _ = s.pool.Exec(c.Request().Context(), `UPDATE employees SET first_name = $1 WHERE id = $2::uuid AND organization_id = $3`, *input.FirstName, empID, principal.OrganizationID)
+	}
+	if input.LastName != nil && *input.LastName != "" {
+		_, _ = s.pool.Exec(c.Request().Context(), `UPDATE employees SET last_name = $1 WHERE id = $2::uuid AND organization_id = $3`, *input.LastName, empID, principal.OrganizationID)
+	}
+	if input.PersonalPhone != nil {
+		_, _ = s.pool.Exec(c.Request().Context(), `UPDATE users SET phone = $1 WHERE id = (SELECT user_id FROM employees WHERE id = $2::uuid)`, *input.PersonalPhone, empID)
+	}
+
+	if err := s.people.UpdatePersonalProfile(c.Request().Context(), principal.OrganizationID, empID, input); err != nil {
+		return problem(c, http.StatusInternalServerError, "profile.update_failed", "Failed to update profile", err.Error())
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{"status": "success"})
