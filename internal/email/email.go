@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -535,4 +536,233 @@ func (s *Service) SendWorkflowNotice(ctx context.Context, toEmail, subject, head
 // SendRawWithHeaders sends an arbitrary HTML email with custom headers (e.g. In-Reply-To, References) and returns the Resend ID.
 func (s *Service) SendRawWithHeaders(ctx context.Context, toEmail, subject, htmlBody string, headers map[string]string) (string, error) {
 	return s.sendViaResendWithHeaders(ctx, toEmail, subject, htmlBody, headers)
+}
+
+type PayslipNotificationInput struct {
+	EmployeeName string
+	PeriodStart  string
+	PeriodEnd    string
+	PayDate      string
+	Currency     string
+	BasePay      int64
+	Earnings     int64
+	Deductions   int64
+	NetPay       int64
+	PortalURL    string
+	CompanyName  string
+	LogoURL      string
+	BrandColor   string
+}
+
+func formatMinorAmount(cents int64, currency string) string {
+	major := float64(cents) / 100.0
+	intPart := int64(major)
+	if intPart < 0 {
+		intPart = -intPart
+	}
+	formatted := formatIntWithCommas(intPart)
+	if major < 0 {
+		formatted = "-" + formatted
+	}
+	if currency == "" {
+		currency = "UGX"
+	}
+	return fmt.Sprintf("%s %s", currency, formatted)
+}
+
+func formatIntWithCommas(n int64) string {
+	in := strconv.FormatInt(n, 10)
+	var out []byte
+	for i, c := range in {
+		if i > 0 && (len(in)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, byte(c))
+	}
+	if len(out) == 0 {
+		return "0"
+	}
+	return string(out)
+}
+
+// SendPayslipNotification sends an executive, beautifully formatted corporate pay statement email.
+func (s *Service) SendPayslipNotification(ctx context.Context, toEmail string, input PayslipNotificationInput) error {
+	company := strings.TrimSpace(input.CompanyName)
+	if company == "" {
+		company = "Gitop"
+	}
+	color := strings.TrimSpace(input.BrandColor)
+	if len(color) != 7 || !strings.HasPrefix(color, "#") {
+		color = "#2563EB"
+	}
+
+	logoHTML := fmt.Sprintf(`<span style="font-size:20px;font-weight:800;color:#111827;letter-spacing:-0.5px;">%s</span>`, html.EscapeString(company))
+	if input.LogoURL != "" {
+		logoHTML = fmt.Sprintf(`<img src="%s" alt="%s" style="max-height:42px;max-width:180px;display:block;">`, html.EscapeString(input.LogoURL), html.EscapeString(company))
+	}
+
+	formattedBase := formatMinorAmount(input.BasePay, input.Currency)
+	formattedEarnings := formatMinorAmount(input.Earnings, input.Currency)
+	formattedDeductions := formatMinorAmount(input.Deductions, input.Currency)
+	formattedNet := formatMinorAmount(input.NetPay, input.Currency)
+
+	subject := fmt.Sprintf("Your Pay Statement is Ready — %s to %s", input.PeriodStart, input.PeriodEnd)
+
+	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pay Statement Notification</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #F4F5F7; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased;">
+  <table width="100%%" border="0" cellpadding="0" cellspacing="0" style="background-color: #F4F5F7; padding: 36px 16px;">
+    <tr>
+      <td align="center">
+        <table width="100%%" border="0" cellpadding="0" cellspacing="0" style="max-width: 600px; background-color: #FFFFFF; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(17, 24, 39, 0.06); border: 1px solid #E5E7EB;">
+          <!-- Top Accent Bar -->
+          <tr>
+            <td style="height: 6px; background: linear-gradient(90deg, #2563EB 0%%, #4F46E5 50%%, #7C3AED 100%%);"></td>
+          </tr>
+          <!-- Header -->
+          <tr>
+            <td style="padding: 24px 32px; border-bottom: 1px solid #F3F4F6;">
+              <table width="100%%" border="0" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td align="left" valign="middle">
+                    %s
+                  </td>
+                  <td align="right" valign="middle">
+                    <span style="display: inline-block; background-color: #ECFDF5; color: #065F46; font-size: 11.5px; font-weight: 700; text-transform: uppercase; padding: 4px 10px; border-radius: 999px; letter-spacing: 0.5px; border: 1px solid #A7F3D0;">
+                      Paid &bull; Disbursed
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <!-- Body -->
+          <tr>
+            <td style="padding: 32px 32px 24px 32px;">
+              <h1 style="margin: 0 0 6px 0; font-size: 21px; font-weight: 800; color: #111827; letter-spacing: -0.02em;">
+                Your Pay Statement is Ready
+              </h1>
+              <p style="margin: 0 0 24px 0; font-size: 13.5px; line-height: 1.6; color: #4B5563;">
+                Hello <strong>%s</strong>, your official payroll statement for the pay cycle <strong>%s to %s</strong> has been calculated and disbursed.
+              </p>
+
+              <!-- Net Pay Hero Callout Box -->
+              <table width="100%%" border="0" cellpadding="0" cellspacing="0" style="background: linear-gradient(135deg, #EFF6FF 0%%, #DBEAFE 100%%); border: 1.5px solid #93C5FD; border-radius: 12px; margin-bottom: 24px;">
+                <tr>
+                  <td style="padding: 20px 24px;">
+                    <table width="100%%" border="0" cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td align="left" valign="middle">
+                          <div style="font-size: 11px; font-weight: 700; color: #1E40AF; text-transform: uppercase; letter-spacing: 0.5px;">
+                            Net Disbursed Take-Home
+                          </div>
+                          <div style="font-size: 28px; font-weight: 900; color: #1D4ED8; margin-top: 4px; letter-spacing: -0.03em;">
+                            %s
+                          </div>
+                        </td>
+                        <td align="right" valign="middle">
+                          <div style="font-size: 12px; color: #2563EB; font-weight: 600;">
+                            Pay Date: %s
+                          </div>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Financial Breakdown Table -->
+              <table width="100%%" border="0" cellpadding="0" cellspacing="0" style="border: 1px solid #E5E7EB; border-radius: 10px; margin-bottom: 28px; overflow: hidden;">
+                <tr style="background-color: #F9FAFB;">
+                  <td style="padding: 10px 16px; font-size: 11px; font-weight: 700; color: #6B7280; text-transform: uppercase;">
+                    Component
+                  </td>
+                  <td align="right" style="padding: 10px 16px; font-size: 11px; font-weight: 700; color: #6B7280; text-transform: uppercase;">
+                    Amount
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding: 12px 16px; font-size: 13.5px; color: #374151; border-top: 1px solid #F3F4F6;">
+                    Base Pay (Regular Salary)
+                  </td>
+                  <td align="right" style="padding: 12px 16px; font-size: 13.5px; font-weight: 600; color: #111827; border-top: 1px solid #F3F4F6;">
+                    %s
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding: 12px 16px; font-size: 13.5px; color: #374151; border-top: 1px solid #F3F4F6;">
+                    Additional Earnings &amp; Allowances
+                  </td>
+                  <td align="right" style="padding: 12px 16px; font-size: 13.5px; font-weight: 600; color: #111827; border-top: 1px solid #F3F4F6;">
+                    %s
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding: 12px 16px; font-size: 13.5px; color: #DC2626; border-top: 1px solid #F3F4F6;">
+                    Total Deductions (Taxes &amp; Statutory)
+                  </td>
+                  <td align="right" style="padding: 12px 16px; font-size: 13.5px; font-weight: 600; color: #DC2626; border-top: 1px solid #F3F4F6;">
+                    -%s
+                  </td>
+                </tr>
+                <tr style="background-color: #F8FAFC;">
+                  <td style="padding: 14px 16px; font-size: 14px; font-weight: 800; color: #111827; border-top: 1.5px solid #E5E7EB;">
+                    Take-Home Net Salary
+                  </td>
+                  <td align="right" style="padding: 14px 16px; font-size: 15px; font-weight: 800; color: #1D4ED8; border-top: 1.5px solid #E5E7EB;">
+                    %s
+                  </td>
+                </tr>
+              </table>
+
+              <!-- CTA Button -->
+              <table width="100%%" border="0" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td align="center">
+                    <a href="%s" target="_blank" style="display: inline-block; background-color: #2563EB; color: #FFFFFF; font-size: 13.5px; font-weight: 700; padding: 13px 30px; border-radius: 9px; text-decoration: none; box-shadow: 0 2px 8px rgba(37,99,235,0.3);">
+                      View Certified Pay Statement &rarr;
+                    </a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <!-- Footer -->
+          <tr>
+            <td style="padding: 22px 32px; background-color: #F9FAFB; border-top: 1px solid #E5E7EB; text-align: center;">
+              <p style="margin: 0 0 4px 0; font-size: 12px; font-weight: 600; color: #6B7280;">
+                %s &bull; Certified Corporate Payroll
+              </p>
+              <p style="margin: 0; font-size: 11px; color: #9CA3AF; line-height: 1.5;">
+                Confidential Document: This communication contains private compensation details intended solely for %s.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`,
+		logoHTML,
+		html.EscapeString(input.EmployeeName),
+		html.EscapeString(input.PeriodStart),
+		html.EscapeString(input.PeriodEnd),
+		formattedNet,
+		html.EscapeString(input.PayDate),
+		formattedBase,
+		formattedEarnings,
+		formattedDeductions,
+		formattedNet,
+		html.EscapeString(input.PortalURL),
+		html.EscapeString(company),
+		html.EscapeString(toEmail),
+	)
+
+	return s.sendViaResend(ctx, toEmail, subject, htmlBody)
 }

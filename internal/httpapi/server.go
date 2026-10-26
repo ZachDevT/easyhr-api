@@ -2510,16 +2510,34 @@ func (s *Server) emailPayrollPayslips(c echo.Context) error {
 	if err != nil {
 		return problem(c, http.StatusInternalServerError, "payroll.payslips_failed", "Internal error", "Could not load payslips")
 	}
-	var company, logo, color string
-	_ = s.pool.QueryRow(c.Request().Context(), `SELECT o.name,COALESCE(w.logo_url,''),COALESCE(w.brand_color,'#4F46E5') FROM organizations o LEFT JOIN workspaces w ON w.organization_id=o.id WHERE o.id=$1`, p.OrganizationID).Scan(&company, &logo, &color)
+	var company, logo, color, subdomain string
+	_ = s.pool.QueryRow(c.Request().Context(), `SELECT o.name, COALESCE(w.logo_url,''), COALESCE(w.brand_color,'#2563EB'), COALESCE(w.subdomain,'') FROM organizations o LEFT JOIN workspaces w ON w.organization_id=o.id WHERE o.id=$1`, p.OrganizationID).Scan(&company, &logo, &color, &subdomain)
 	var sent, failed int
 	for _, slip := range items {
 		if slip.Email == "" {
 			failed++
 			continue
 		}
-		body := fmt.Sprintf("Your payslip for %s to %s is ready.\nBase pay: %s %d\nEarnings: %d\nDeductions: %d\nNet pay: %d", slip.PeriodStart, slip.PeriodEnd, slip.Currency, slip.BasePay, slip.Earnings, slip.Deductions, slip.NetPay)
-		if err := s.email.SendWorkflowNotice(c.Request().Context(), slip.Email, "Your payslip is ready", "Payslip for "+slip.PeriodStart+" to "+slip.PeriodEnd, body, "View payslip", "https://easyhr.pro/payroll/payslips/"+slip.ID, email.BrandingInfo{CompanyName: company, LogoURL: logo, BrandColor: color}); err != nil {
+		portalURL := fmt.Sprintf("https://%s.easyhr.pro/payroll/payslips/%s", subdomain, slip.ID)
+		if subdomain == "" {
+			portalURL = fmt.Sprintf("https://easyhr.pro/payroll/payslips/%s", slip.ID)
+		}
+		err := s.email.SendPayslipNotification(c.Request().Context(), slip.Email, email.PayslipNotificationInput{
+			EmployeeName: slip.EmployeeName,
+			PeriodStart:  slip.PeriodStart,
+			PeriodEnd:    slip.PeriodEnd,
+			PayDate:      slip.PayDate,
+			Currency:     slip.Currency,
+			BasePay:      slip.BasePay,
+			Earnings:     slip.Earnings,
+			Deductions:   slip.Deductions,
+			NetPay:       slip.NetPay,
+			PortalURL:    portalURL,
+			CompanyName:  company,
+			LogoURL:      logo,
+			BrandColor:   color,
+		})
+		if err != nil {
 			failed++
 			slog.Error("payslip email failed", "payslipId", slip.ID, "error", err)
 			continue
