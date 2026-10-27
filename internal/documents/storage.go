@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -16,6 +17,7 @@ import (
 type Storage interface {
 	UploadURL(ctx context.Context, objectKey, contentType string, sizeBytes int64, expiresIn time.Duration) (string, error)
 	DownloadURL(ctx context.Context, objectKey string, expiresIn time.Duration) (string, error)
+	AttachmentURL(ctx context.Context, objectKey, filename string, expiresIn time.Duration) (string, error)
 	PutObject(ctx context.Context, objectKey, contentType string, body io.Reader, sizeBytes int64) error
 	GetObject(ctx context.Context, objectKey string) (io.ReadCloser, string, int64, error)
 }
@@ -78,6 +80,28 @@ func (storage *S3Storage) DownloadURL(ctx context.Context, objectKey string, exp
 	}, s3.WithPresignExpires(expiresIn))
 	if err != nil {
 		return "", fmt.Errorf("presign document download: %w", err)
+	}
+	return result.URL, nil
+}
+
+// AttachmentURL presigns a GET that forces the browser to save the file with the given filename.
+func (storage *S3Storage) AttachmentURL(ctx context.Context, objectKey, filename string, expiresIn time.Duration) (string, error) {
+	safe := strings.Map(func(r rune) rune {
+		if r == '"' || r == '\\' || r < 32 {
+			return '_'
+		}
+		return r
+	}, filename)
+	if safe == "" {
+		safe = "document"
+	}
+	result, err := storage.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket:                     aws.String(storage.bucket),
+		Key:                        aws.String(objectKey),
+		ResponseContentDisposition: aws.String(fmt.Sprintf(`attachment; filename="%s"`, safe)),
+	}, s3.WithPresignExpires(expiresIn))
+	if err != nil {
+		return "", fmt.Errorf("presign document attachment: %w", err)
 	}
 	return result.URL, nil
 }
