@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/jackc/pgx/v5"
@@ -65,6 +66,61 @@ func (e *ConfiguredEngine) Calculate(ctx context.Context, config Configuration, 
 	if ccy != config.Currency {
 		return RunItemData{}, ErrCompensationCurrencyMismatch
 	}
+
+	// Sync worked minutes from submitted timesheets or attendance punches within the period
+	var workedMinutes int
+	_ = e.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(total_minutes), 0)
+		FROM timesheet_submissions
+		WHERE organization_id = $1 AND employee_id = $2
+		  AND week_start <= $4::date AND week_end >= $3::date
+	`, config.OrganizationID, employeeID, period.StartDate, period.EndDate).Scan(&workedMinutes)
+
+	if workedMinutes == 0 {
+		_ = e.pool.QueryRow(ctx, `
+			WITH ordered AS (
+				SELECT kind, occurred_at,
+					LEAD(kind) OVER (ORDER BY occurred_at) AS next_kind,
+					LEAD(occurred_at) OVER (ORDER BY occurred_at) AS next_at
+				FROM attendance_punches
+				WHERE organization_id = $1
+				  AND employee_id = $2
+				  AND occurred_at >= $3::date
+				  AND occurred_at < ($4::date + interval '1 day')
+			),
+			pairs AS (
+				SELECT EXTRACT(EPOCH FROM (next_at - occurred_at)) / 60.0 AS mins
+				FROM ordered
+				WHERE kind IN ('clock_in', 'break_end')
+				  AND next_kind IN ('clock_out', 'break_start')
+			)
+			SELECT COALESCE(ROUND(SUM(mins))::int, 0)
+			FROM pairs
+			WHERE mins > 0 AND mins < 1440
+		`, config.OrganizationID, employeeID, period.StartDate, period.EndDate).Scan(&workedMinutes)
+	}
+
+	stdMins := config.StandardMonthlyMinutes
+	if stdMins <= 0 {
+		stdMins = 10400
+	}
+	otMult := config.OvertimeMultiplier
+	if otMult <= 0 {
+		otMult = 1.5
+	}
+
+	basePay := base
+	var earnings int64
+	if workedMinutes > 0 {
+		if workedMinutes < int(stdMins) {
+			basePay = int64(math.Round(float64(base) * float64(workedMinutes) / float64(stdMins)))
+		} else if workedMinutes > int(stdMins) {
+			otMins := workedMinutes - int(stdMins)
+			earnings = int64(math.Round(float64(base) * (float64(otMins) / float64(stdMins)) * otMult))
+		}
+	}
+	gross := basePay + earnings
+
 	rows, err := e.pool.Query(ctx, `SELECT r.rule_type,r.bands,r.rate_percent,r.amount_minor,r.applies_to,r.applies_to_id::text
 		FROM payroll_tax_rules r
 		WHERE r.organization_id=$1 AND r.country=$2 AND r.active=true
@@ -90,7 +146,7 @@ func (e *ConfiguredEngine) Calculate(ctx context.Context, config Configuration, 
 			if amount > 0 {
 				deductions += amount
 			} else {
-				deductions += base * int64(rate*10000) / 1_000_000
+				deductions += gross * int64(rate*10000) / 1_000_000
 			}
 			continue
 		}
@@ -107,7 +163,7 @@ func (e *ConfiguredEngine) Calculate(ctx context.Context, config Configuration, 
 			}
 			return bands[i].UpTo < bands[j].UpTo
 		})
-		remaining := base
+		remaining := gross
 		var lower int64
 		var tax int64
 		for i, b := range bands {
@@ -138,10 +194,10 @@ func (e *ConfiguredEngine) Calculate(ctx context.Context, config Configuration, 
 	if rules == 0 {
 		return RunItemData{}, ErrUnsupportedJurisdiction
 	}
-	if deductions > base {
-		deductions = base
+	if deductions > gross {
+		deductions = gross
 	}
-	return RunItemData{BasePay: base, Deductions: deductions, NetPay: base - deductions}, nil
+	return RunItemData{BasePay: basePay, Earnings: earnings, Deductions: deductions, NetPay: gross - deductions}, nil
 }
 
 func (e *UgandaEngine) Calculate(ctx context.Context, config Configuration, employeeID string, period Period) (RunItemData, error) {

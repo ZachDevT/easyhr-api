@@ -107,7 +107,15 @@ func (service *Service) InitiateRun(ctx context.Context, organizationID, actorUs
 	return r, nil
 }
 
-func (service *Service) LockRun(ctx context.Context, organizationID, actorUserID, runID string) error {
+type LockRunItemInput struct {
+	EmployeeID string `json:"employeeId"`
+	BasePay    int64  `json:"basePay"`
+	Earnings   int64  `json:"earnings"`
+	Deductions int64  `json:"deductions"`
+	NetPay     int64  `json:"netPay"`
+}
+
+func (service *Service) LockRun(ctx context.Context, organizationID, actorUserID, runID string, items []LockRunItemInput) error {
 	tx, err := service.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -128,6 +136,21 @@ func (service *Service) LockRun(ctx context.Context, organizationID, actorUserID
 	}
 	if res.RowsAffected() == 0 {
 		return ErrInvalidState
+	}
+
+	// Persist reviewed/attendance-synced run item amounts before generating paystubs
+	for _, it := range items {
+		if it.EmployeeID == "" {
+			continue
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE payroll_run_items
+			SET base_pay = $1, earnings = $2, deductions = $3, net_pay = $4
+			WHERE payroll_run_id = $5 AND employee_id = $6
+		`, it.BasePay, it.Earnings, it.Deductions, it.NetPay, runID, it.EmployeeID)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Mark period as locked

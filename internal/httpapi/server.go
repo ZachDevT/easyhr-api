@@ -2495,7 +2495,11 @@ func (s *Server) lockPayrollRun(c echo.Context) error {
 	if !principal.HasPermission("payroll:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to manage payroll")
 	}
-	err := s.payroll.LockRun(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Param("runId"))
+	var body struct {
+		Items []payroll.LockRunItemInput `json:"items"`
+	}
+	_ = c.Bind(&body)
+	err := s.payroll.LockRun(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Param("runId"), body.Items)
 	if err != nil {
 		if errors.Is(err, payroll.ErrInvalidState) {
 			return problem(c, http.StatusConflict, "payroll.invalid_state", "Conflict", "Run cannot be locked in its current state")
