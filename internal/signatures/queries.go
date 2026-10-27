@@ -31,25 +31,27 @@ type DetailedSignatureRequest struct {
 }
 
 type MySignatureItem struct {
-	ID           string  `json:"id"`
-	RequestID    string  `json:"requestId"`
-	DocumentID   string  `json:"documentId"`
-	DocumentName string  `json:"documentName"`
-	DocumentURL  string  `json:"documentUrl,omitempty"`
-	Body         string  `json:"body,omitempty"`
-	Header       string  `json:"header,omitempty"`
-	Footer       string  `json:"footer,omitempty"`
-	LogoURL      string  `json:"logoUrl,omitempty"`
-	BrandColor   string  `json:"brandColor,omitempty"`
-	WebsiteURL   string  `json:"websiteUrl,omitempty"`
-	ContactPhone string  `json:"contactPhone,omitempty"`
-	ContactEmail string  `json:"contactEmail,omitempty"`
-	SenderName   string  `json:"senderName"`
-	SenderRole   string  `json:"senderRole"`
-	Status       string  `json:"status"`
-	SentAt       string  `json:"sentAt"`
-	SignedAt     *string `json:"signedAt"`
-	Message      string  `json:"message"`
+	ID            string  `json:"id"`
+	RequestID     string  `json:"requestId"`
+	DocumentID    string  `json:"documentId"`
+	DocumentName  string  `json:"documentName"`
+	DocumentURL   string  `json:"documentUrl,omitempty"`
+	Body          string  `json:"body,omitempty"`
+	Header        string  `json:"header,omitempty"`
+	Footer        string  `json:"footer,omitempty"`
+	LogoURL       string  `json:"logoUrl,omitempty"`
+	BrandColor    string  `json:"brandColor,omitempty"`
+	WebsiteURL    string  `json:"websiteUrl,omitempty"`
+	ContactPhone  string  `json:"contactPhone,omitempty"`
+	ContactEmail  string  `json:"contactEmail,omitempty"`
+	SenderName    string  `json:"senderName"`
+	SenderRole    string  `json:"senderRole"`
+	Status        string  `json:"status"`
+	SentAt        string  `json:"sentAt"`
+	SignedAt      *string `json:"signedAt"`
+	Message       string  `json:"message"`
+	SignatureType string  `json:"signatureType,omitempty"`
+	SignatureData string  `json:"signatureData,omitempty"`
 }
 
 func (service *Service) ListRequests(ctx context.Context, organizationID string) ([]DetailedSignatureRequest, error) {
@@ -110,7 +112,10 @@ func (service *Service) ListRequests(ctx context.Context, organizationID string)
 			r.signature_request_id::text,
 			r.recipient_email,
 			r.recipient_name,
-			r.status
+			r.status,
+			COALESCE(r.signature_type, ''),
+			COALESCE(r.signature_data, ''),
+			COALESCE(to_char(r.signed_at, 'Mon DD, YYYY'), '')
 		FROM signature_recipients r
 		JOIN signature_requests sr ON sr.id = r.signature_request_id
 		WHERE sr.organization_id = $1
@@ -121,7 +126,7 @@ func (service *Service) ListRequests(ctx context.Context, organizationID string)
 		for recRows.Next() {
 			var rec SignatureRecipient
 			var reqID string
-			if err := recRows.Scan(&rec.ID, &reqID, &rec.Email, &rec.Name, &rec.Status); err == nil {
+			if err := recRows.Scan(&rec.ID, &reqID, &rec.Email, &rec.Name, &rec.Status, &rec.SignatureType, &rec.SignatureData, &rec.SignedAt); err == nil {
 				if idx, ok := reqMap[reqID]; ok {
 					requests[idx].Recipients = append(requests[idx].Recipients, rec)
 				}
@@ -151,7 +156,9 @@ func (service *Service) ListMySignatureRequests(ctx context.Context, organizatio
 			r.status,
 			to_char(sr.created_at, 'Mon DD, YYYY'),
 			to_char(r.signed_at, 'Mon DD, YYYY'),
-			COALESCE(sr.custom_message, '')
+			COALESCE(sr.custom_message, ''),
+			COALESCE(r.signature_type, ''),
+			COALESCE(r.signature_data, '')
 		FROM signature_recipients r
 		JOIN signature_requests sr ON sr.id = r.signature_request_id
 		LEFT JOIN documents d ON d.id = sr.document_id
@@ -186,6 +193,8 @@ func (service *Service) ListMySignatureRequests(ctx context.Context, organizatio
 			&item.SentAt,
 			&item.SignedAt,
 			&item.Message,
+			&item.SignatureType,
+			&item.SignatureData,
 		); err != nil {
 			return nil, err
 		}

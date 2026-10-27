@@ -26,10 +26,13 @@ type SignatureRequest struct {
 }
 
 type SignatureRecipient struct {
-	ID     string `json:"id"`
-	Email  string `json:"email"`
-	Name   string `json:"name"`
-	Status string `json:"status"`
+	ID            string `json:"id"`
+	Email         string `json:"email"`
+	Name          string `json:"name"`
+	Status        string `json:"status"`
+	SignatureType string `json:"signatureType,omitempty"`
+	SignatureData string `json:"signatureData,omitempty"`
+	SignedAt      string `json:"signedAt,omitempty"`
 }
 
 func (service *Service) CreateRequest(ctx context.Context, organizationID, actorUserID, documentID string, input CreateSignatureRequestInput) (SignatureRequest, error) {
