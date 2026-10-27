@@ -894,6 +894,19 @@ func (s *Service) GetOrCreateDM(ctx context.Context, actor Actor, in CreateDMInp
 	participantMap := make(map[string]bool)
 	if actor.EmployeeID != "" {
 		participantMap[actor.EmployeeID] = true
+	} else if actor.UserID != "" {
+		var myEmpUUID string
+		_ = s.pool.QueryRow(ctx, `
+			SELECT e.id::text FROM employees e
+			WHERE e.organization_id = $1::uuid
+			  AND (
+			    (CASE WHEN $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN e.user_id = $2::uuid ELSE false END)
+			  )
+			LIMIT 1
+		`, actor.OrganizationID, actor.UserID).Scan(&myEmpUUID)
+		if myEmpUUID != "" {
+			participantMap[myEmpUUID] = true
+		}
 	}
 
 	for _, pid := range rawParticipants {
@@ -903,10 +916,13 @@ func (s *Service) GetOrCreateDM(ctx context.Context, actor Actor, in CreateDMInp
 		}
 		var empUUID string
 		_ = s.pool.QueryRow(ctx, `
-			SELECT id::text FROM employees
-			WHERE organization_id = $1::uuid
+			SELECT e.id::text FROM employees e
+			LEFT JOIN users u ON u.id = e.user_id
+			WHERE e.organization_id = $1::uuid
 			  AND (
-			    (CASE WHEN $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN id = $2::uuid OR user_id = $2::uuid ELSE false END)
+			    (CASE WHEN $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN e.id = $2::uuid OR e.user_id = $2::uuid ELSE false END)
+			    OR LOWER(e.work_email) = LOWER($2)
+			    OR (u.external_identity_id IS NOT NULL AND u.external_identity_id = $2)
 			  )
 			LIMIT 1
 		`, actor.OrganizationID, pid).Scan(&empUUID)
