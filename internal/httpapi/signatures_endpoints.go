@@ -40,6 +40,16 @@ func (s *Server) listSignatureRequests(c echo.Context) error {
 	if err != nil {
 		return problem(c, http.StatusInternalServerError, "signatures.list_failed", "Internal error", err.Error())
 	}
+	if s.storage != nil {
+		for i := range results {
+			if results[i].DocumentID == "" {
+				continue
+			}
+			if link, linkErr := s.documents.GetDownloadUrl(c.Request().Context(), principal.OrganizationID, principal.UserID, results[i].DocumentID); linkErr == nil {
+				results[i].DocumentURL = link.URL
+			}
+		}
+	}
 	return c.JSON(http.StatusOK, map[string]any{"data": results})
 }
 

@@ -2094,16 +2094,16 @@ func (s *Server) getOnboardingHandbookDownloadURL(c echo.Context) error {
 	var handbookRef string
 	if err := s.pool.QueryRow(c.Request().Context(), `SELECT COALESCE(handbook_url, '') FROM organization_onboarding_settings WHERE organization_id = $1`, principal.OrganizationID).Scan(&handbookRef); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return problem(c, http.StatusNotFound, "onboarding.handbook_not_found", "Not found", "No handbook document has been configured")
+			return c.JSON(http.StatusOK, map[string]string{"url": "", "downloadUrl": "", "filename": ""})
 		}
 		return problem(c, http.StatusInternalServerError, "onboarding.handbook_failed", "Internal server error", "Could not load handbook")
 	}
 	if !strings.HasPrefix(handbookRef, "document:") {
-		return problem(c, http.StatusNotFound, "onboarding.handbook_not_found", "Not found", "No uploaded handbook document has been configured")
+		return c.JSON(http.StatusOK, map[string]string{"url": "", "downloadUrl": "", "filename": ""})
 	}
 	link, err := s.documents.GetDownloadUrl(c.Request().Context(), principal.OrganizationID, principal.UserID, strings.TrimPrefix(handbookRef, "document:"))
 	if err != nil {
-		return problem(c, http.StatusNotFound, "onboarding.handbook_not_found", "Not found", "The configured handbook document is unavailable")
+		return c.JSON(http.StatusOK, map[string]string{"url": "", "downloadUrl": "", "filename": ""})
 	}
 	return c.JSON(http.StatusOK, link)
 }
@@ -2479,7 +2479,7 @@ func (s *Server) listPayrollConfigurations(c echo.Context) error {
 	if !ok {
 		return c.NoContent(http.StatusUnauthorized)
 	}
-	if !principal.HasPermission("payroll:manage") {
+	if !principal.HasPermission("payroll:manage") && !principal.HasPermission("payroll:read") && !principal.HasPermission("organization:read") && !principal.HasPermission("employees:read") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view payroll configurations")
 	}
 	result, err := s.payroll.ListConfigurations(c.Request().Context(), principal.OrganizationID)

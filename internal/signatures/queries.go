@@ -20,6 +20,7 @@ type DetailedSignatureRequest struct {
 	ID            string               `json:"id"`
 	DocumentID    string               `json:"documentId"`
 	DocumentName  string               `json:"documentName"`
+	DocumentURL   string               `json:"documentUrl,omitempty"`
 	Body          string               `json:"body,omitempty"`
 	Status        string               `json:"status"`
 	CustomMessage string               `json:"customMessage"`
