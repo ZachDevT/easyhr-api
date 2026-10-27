@@ -360,6 +360,8 @@ func (s *Server) registerRoutes() {
 		// Benefits
 		s.api.GET("/benefits/plans", s.listBenefitPlans)
 		s.api.POST("/benefits/plans", s.createBenefitPlan)
+		s.api.PUT("/benefits/plans/:planId", s.updateBenefitPlan)
+		s.api.DELETE("/benefits/plans/:planId", s.deleteBenefitPlan)
 		s.api.GET("/benefits/enrollments", s.listAllBenefitEnrollments)
 		s.api.GET("/benefits/enrollments/:employeeId", s.listBenefitEnrollments)
 		s.api.POST("/benefits/enrollments/:employeeId", s.createBenefitEnrollment)
@@ -3438,10 +3440,6 @@ func (s *Server) listBenefitPlans(c echo.Context) error {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
-	if !principal.HasPermission("benefits:manage") && !principal.HasPermission("benefits:read") && !principal.HasPermission("organization:manage") {
-		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have administrative permission to access benefit plans")
-	}
-
 	result, err := s.benefits.ListPlans(c.Request().Context(), principal.OrganizationID)
 	if err != nil {
 		return problem(c, http.StatusInternalServerError, "benefits.list_plans_failed", "Internal error", "Could not fetch plans")
@@ -3467,6 +3465,42 @@ func (s *Server) createBenefitPlan(c echo.Context) error {
 		return problem(c, http.StatusInternalServerError, "benefits.create_failed", "Internal error", "Could not create")
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) updateBenefitPlan(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("benefits:manage") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
+	}
+	var input benefits.CreatePlanInput
+	if err := c.Bind(&input); err != nil {
+		return problem(c, http.StatusBadRequest, "request.invalid", "Invalid", err.Error())
+	}
+	result, err := s.benefits.UpdatePlan(c.Request().Context(), principal.OrganizationID, c.Param("planId"), input)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "benefits.update_failed", "Internal error", "Could not update benefit plan")
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) deleteBenefitPlan(c echo.Context) error {
+	principal, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
+	if !principal.HasPermission("benefits:manage") && !principal.HasPermission("organization:manage") {
+		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "No permission")
+	}
+	err := s.benefits.DeletePlan(c.Request().Context(), principal.OrganizationID, c.Param("planId"))
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "benefits.delete_failed", "Internal error", "Could not delete benefit plan")
+	}
+	return c.NoContent(http.StatusNoContent)
 }
 
 func (s *Server) listAllBenefitEnrollments(c echo.Context) error {

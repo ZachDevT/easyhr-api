@@ -99,3 +99,40 @@ func (service *Service) CreatePlan(ctx context.Context, organizationID, actorUse
 	}
 	return item, nil
 }
+
+func (service *Service) UpdatePlan(ctx context.Context, organizationID, planID string, input CreatePlanInput) (BenefitPlan, error) {
+	input.Name = strings.TrimSpace(input.Name)
+	input.Currency = strings.ToUpper(strings.TrimSpace(input.Currency))
+	if input.Category == "" {
+		input.Category = "other"
+	}
+	if input.Name == "" || len(input.Name) > 255 {
+		return BenefitPlan{}, fmt.Errorf("name must contain between 1 and 255 characters")
+	}
+	if len(input.Currency) != 3 {
+		return BenefitPlan{}, fmt.Errorf("currency must be a three-letter code")
+	}
+	if input.EmployerCostMinor < 0 || input.EmployeeCostMinor < 0 {
+		return BenefitPlan{}, fmt.Errorf("benefit costs cannot be negative")
+	}
+
+	var item BenefitPlan
+	err := service.pool.QueryRow(ctx, `
+		UPDATE benefit_plans
+		SET name = $1, category = $2, description = $3, employer_cost_minor = $4, employee_cost_minor = $5, currency = $6, updated_at = NOW()
+		WHERE id = $7 AND organization_id = $8
+		RETURNING id::text, name, category, description, employer_cost_minor, employee_cost_minor, currency
+	`, input.Name, input.Category, input.Description, input.EmployerCostMinor, input.EmployeeCostMinor, input.Currency, planID, organizationID).Scan(
+		&item.ID, &item.Name, &item.Category, &item.Description, &item.EmployerCostMinor, &item.EmployeeCostMinor, &item.Currency,
+	)
+	if err != nil {
+		return BenefitPlan{}, err
+	}
+	return item, nil
+}
+
+func (service *Service) DeletePlan(ctx context.Context, organizationID, planID string) error {
+	_, _ = service.pool.Exec(ctx, `DELETE FROM benefit_enrollments WHERE plan_id = $1 AND organization_id = $2`, planID, organizationID)
+	_, err := service.pool.Exec(ctx, `DELETE FROM benefit_plans WHERE id = $1 AND organization_id = $2`, planID, organizationID)
+	return err
+}
