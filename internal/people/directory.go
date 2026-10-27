@@ -25,6 +25,7 @@ type EmployeeSummary struct {
 	Manager       string  `json:"manager"`
 	JobTitle      *string `json:"jobTitle"`
 	HiredOn       *string `json:"hiredOn"`
+	CreatedAt     *string `json:"createdAt"`
 	Avatar        string  `json:"avatar"`
 }
 
@@ -34,7 +35,7 @@ type Directory struct {
 
 func NewDirectory(pool *pgxpool.Pool) *Directory { return &Directory{pool: pool} }
 
-func (directory *Directory) List(ctx context.Context, organizationID, search, status string, limit int) ([]EmployeeSummary, error) {
+func (directory *Directory) List(ctx context.Context, organizationID, search, status, sortOrder string, limit int) ([]EmployeeSummary, error) {
 	if limit < 1 || limit > 100 {
 		limit = 100
 	}
@@ -47,7 +48,14 @@ func (directory *Directory) List(ctx context.Context, organizationID, search, st
 
 	_ = directory.EnsureMemberEmployees(ctx, organizationID)
 
-	rows, err := directory.pool.Query(ctx, `
+	orderClause := "e.created_at ASC, e.last_name ASC, e.first_name ASC"
+	if sortOrder == "newest" || sortOrder == "hired_desc" {
+		orderClause = "COALESCE(e.hired_on, e.created_at::date) DESC, e.created_at DESC"
+	} else if sortOrder == "oldest" {
+		orderClause = "COALESCE(e.hired_on, e.created_at::date) ASC, e.created_at ASC"
+	}
+
+	query := fmt.Sprintf(`
         SELECT 
             e.id::text, 
             e.first_name, 
@@ -65,6 +73,7 @@ func (directory *Directory) List(ctx context.Context, organizationID, search, st
             COALESCE(NULLIF(TRIM(CONCAT(m.first_name, ' ', m.last_name)), ''), 'No manager assigned') AS manager,
             COALESCE(a.job_title, 'Team Member') AS job_title, 
             e.hired_on::text,
+            to_char(e.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
             COALESCE(NULLIF(profile.avatar_url, ''), COALESCE(u.avatar_url, '')) AS avatar
         FROM employees e
         LEFT JOIN employee_personal_profiles profile ON profile.employee_id = e.id
@@ -82,9 +91,11 @@ func (directory *Directory) List(ctx context.Context, organizationID, search, st
         LEFT JOIN users u ON u.id = e.user_id
         WHERE e.organization_id = $1
           AND ($2 = '' OR e.status = $2)
-          AND ($3 = '' OR concat_ws(' ', e.first_name, e.last_name, coalesce(e.preferred_name, ''), e.work_email, a.job_title, d.name) ILIKE '%' || $3 || '%')
-        ORDER BY e.created_at ASC, e.last_name ASC, e.first_name ASC
-        LIMIT $4`, organizationID, status, strings.TrimSpace(search), limit)
+          AND ($3 = '' OR concat_ws(' ', e.first_name, e.last_name, coalesce(e.preferred_name, ''), e.work_email, a.job_title, d.name) ILIKE '%%' || $3 || '%%')
+        ORDER BY %s
+        LIMIT $4`, orderClause)
+
+	rows, err := directory.pool.Query(ctx, query, organizationID, status, strings.TrimSpace(search), limit)
 	if err != nil {
 		return nil, fmt.Errorf("list employees: %w", err)
 	}
@@ -110,6 +121,7 @@ func (directory *Directory) List(ctx context.Context, organizationID, search, st
 			&employee.Manager,
 			&employee.JobTitle,
 			&employee.HiredOn,
+			&employee.CreatedAt,
 			&employee.Avatar,
 		); err != nil {
 			return nil, fmt.Errorf("scan employee: %w", err)

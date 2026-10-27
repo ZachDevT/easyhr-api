@@ -2177,7 +2177,7 @@ func (s *Server) listEmployees(c echo.Context) error {
 		}
 		limit = parsed
 	}
-	items, err := s.people.List(c.Request().Context(), principal.OrganizationID, c.QueryParam("search"), c.QueryParam("status"), limit)
+	items, err := s.people.List(c.Request().Context(), principal.OrganizationID, c.QueryParam("search"), c.QueryParam("status"), c.QueryParam("sort"), limit)
 	if err != nil {
 		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_filter", "Invalid request", err.Error())
 	}
