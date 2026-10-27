@@ -423,6 +423,7 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/payroll/runs/:runId/lock", s.lockPayrollRun)
 		s.api.POST("/payroll/runs/:runId/payslips/email", s.emailPayrollPayslips)
 		s.api.GET("/payroll/runs/:runId/payslips", s.listPayrollPayslips)
+		s.api.GET("/payroll/payslips", s.listEmployeePayslips)
 		s.api.GET("/payroll/payslips/:paystubId", s.getMyPayslip)
 
 		// Policies
@@ -2351,9 +2352,13 @@ func (s *Server) getDocumentDownloadUrl(c echo.Context) error {
 	if !ok {
 		return c.NoContent(http.StatusUnauthorized)
 	}
-	// Simplified permission check: in a real app we'd verify the user can see this specific document based on employee link
+	// HR roles may download any organization document; employees may download documents linked to their own record.
 	if !principal.HasPermission("documents:read") && !principal.HasPermission("documents:manage") {
-		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view documents")
+		var owns bool
+		_ = s.pool.QueryRow(c.Request().Context(), `SELECT EXISTS (SELECT 1 FROM documents d JOIN employees e ON e.id = d.employee_id WHERE d.id::text = $1 AND d.organization_id = $2 AND e.user_id = $3)`, c.Param("documentId"), principal.OrganizationID, principal.UserID).Scan(&owns)
+		if !owns {
+			return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to view documents")
+		}
 	}
 	result, err := s.documents.GetDownloadUrl(c.Request().Context(), principal.OrganizationID, principal.UserID, c.Param("documentId"))
 	if err != nil {
@@ -2568,12 +2573,43 @@ func (s *Server) listPayrollPayslips(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"data": items})
 }
 
+func (s *Server) listEmployeePayslips(c echo.Context) error {
+	p, ok := identity.PrincipalFromContext(c.Request().Context())
+	if !ok {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	employeeID := strings.TrimSpace(c.QueryParam("employeeId"))
+	ctx := c.Request().Context()
+	if employeeID != "" && !p.HasPermission("payroll:manage") {
+		// Non-HR users may only list their own payslips.
+		own, err := s.payroll.ListPayslipsForEmployee(ctx, p.OrganizationID, "", p.UserID)
+		if err != nil {
+			return problem(c, http.StatusInternalServerError, "payroll.payslips_failed", "Internal error", "Could not load payslips")
+		}
+		filtered := []payroll.Payslip{}
+		for _, slip := range own {
+			if slip.EmployeeID == employeeID {
+				filtered = append(filtered, slip)
+			}
+		}
+		return c.JSON(http.StatusOK, map[string]any{"data": filtered})
+	}
+	items, err := s.payroll.ListPayslipsForEmployee(ctx, p.OrganizationID, employeeID, p.UserID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "payroll.payslips_failed", "Internal error", "Could not load payslips")
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": items})
+}
+
 func (s *Server) getMyPayslip(c echo.Context) error {
 	p, ok := identity.PrincipalFromContext(c.Request().Context())
 	if !ok {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 	slip, err := s.payroll.GetPayslipForUser(c.Request().Context(), p.OrganizationID, p.UserID, c.Param("paystubId"))
+	if err != nil && p.HasPermission("payroll:manage") {
+		slip, err = s.payroll.GetPayslip(c.Request().Context(), p.OrganizationID, c.Param("paystubId"))
+	}
 	if err != nil {
 		return problem(c, http.StatusNotFound, "payroll.payslip_not_found", "Not found", "Payslip unavailable")
 	}
