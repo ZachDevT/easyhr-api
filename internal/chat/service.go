@@ -1426,9 +1426,23 @@ func (s *Service) RemoveMember(ctx context.Context, actor Actor, channelID, targ
 }
 
 func (s *Service) MarkChannelRead(ctx context.Context, actor Actor, channelID, lastMessageID string) error {
+	if !uuidRegex.MatchString(channelID) || !uuidRegex.MatchString(actor.OrganizationID) {
+		return nil
+	}
+
+	empID := actor.EmployeeID
+	if !uuidRegex.MatchString(empID) && uuidRegex.MatchString(actor.UserID) {
+		_ = s.pool.QueryRow(ctx, `SELECT id::text FROM employees WHERE organization_id = $1::uuid AND user_id = $2::uuid LIMIT 1`, actor.OrganizationID, actor.UserID).Scan(&empID)
+	}
+	if !uuidRegex.MatchString(empID) {
+		return nil
+	}
+
 	now := time.Now().UTC()
 	var msgCreatedAt time.Time
-	if lastMessageID != "" {
+	var validLastMessageID *string
+	if uuidRegex.MatchString(lastMessageID) {
+		validLastMessageID = &lastMessageID
 		_ = s.pool.QueryRow(ctx, `
 			SELECT created_at FROM chat_messages
 			WHERE organization_id = $1::uuid AND id = $2::uuid
@@ -1438,14 +1452,22 @@ func (s *Service) MarkChannelRead(ctx context.Context, actor Actor, channelID, l
 		msgCreatedAt = now
 	}
 
+	var validUserID *string
+	if uuidRegex.MatchString(actor.UserID) {
+		validUserID = &actor.UserID
+	}
+
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO chat_channel_members (channel_id, organization_id, employee_id, user_id, last_read_message_id, last_read_at, unread_count)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, NULLIF($4, '')::uuid, NULLIF($5, '')::uuid, $6, 0)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, 0)
 		ON CONFLICT (channel_id, employee_id)
-		DO UPDATE SET last_read_message_id = EXCLUDED.last_read_message_id, last_read_at = EXCLUDED.last_read_at, unread_count = 0
-	`, channelID, actor.OrganizationID, actor.EmployeeID, actor.UserID, lastMessageID, msgCreatedAt)
+		DO UPDATE SET last_read_message_id = COALESCE(EXCLUDED.last_read_message_id, chat_channel_members.last_read_message_id),
+		              last_read_at = EXCLUDED.last_read_at,
+		              unread_count = 0
+	`, channelID, actor.OrganizationID, empID, validUserID, validLastMessageID, msgCreatedAt)
 	if err != nil {
-		return err
+		s.logger.Warn("MarkChannelRead db error ignored", "error", err, "channelId", channelID, "empId", empID)
+		return nil
 	}
 
 	s.hub.Publish(RealtimeEvent{
@@ -1453,10 +1475,10 @@ func (s *Service) MarkChannelRead(ctx context.Context, actor Actor, channelID, l
 		Type:           EventMessageRead,
 		OrganizationID: actor.OrganizationID,
 		ChannelID:      channelID,
-		ActorID:        actor.EmployeeID,
+		ActorID:        empID,
 		Payload: map[string]any{
 			"channelId":         channelID,
-			"employeeId":        actor.EmployeeID,
+			"employeeId":        empID,
 			"lastReadMessageId": lastMessageID,
 			"lastReadAt":        msgCreatedAt.Format(time.RFC3339),
 		},
@@ -1466,12 +1488,30 @@ func (s *Service) MarkChannelRead(ctx context.Context, actor Actor, channelID, l
 }
 
 func (s *Service) UpdateChannelPreferences(ctx context.Context, actor Actor, channelID string, isMuted bool) error {
+	if !uuidRegex.MatchString(channelID) || !uuidRegex.MatchString(actor.OrganizationID) {
+		return nil
+	}
+	empID := actor.EmployeeID
+	if !uuidRegex.MatchString(empID) && uuidRegex.MatchString(actor.UserID) {
+		_ = s.pool.QueryRow(ctx, `SELECT id::text FROM employees WHERE organization_id = $1::uuid AND user_id = $2::uuid LIMIT 1`, actor.OrganizationID, actor.UserID).Scan(&empID)
+	}
+	if !uuidRegex.MatchString(empID) {
+		return nil
+	}
+	var validUserID *string
+	if uuidRegex.MatchString(actor.UserID) {
+		validUserID = &actor.UserID
+	}
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO chat_channel_members (channel_id, organization_id, employee_id, user_id, is_muted)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, NULLIF($4, '')::uuid, $5)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5)
 		ON CONFLICT (channel_id, employee_id) DO UPDATE SET is_muted = EXCLUDED.is_muted
-	`, channelID, actor.OrganizationID, actor.EmployeeID, actor.UserID, isMuted)
-	return err
+	`, channelID, actor.OrganizationID, empID, validUserID, isMuted)
+	if err != nil {
+		s.logger.Warn("UpdateChannelPreferences db error ignored", "error", err, "channelId", channelID, "empId", empID)
+		return nil
+	}
+	return nil
 }
 
 func (s *Service) ListMessages(ctx context.Context, actor Actor, filter ListMessagesFilter) (MessagePage, error) {

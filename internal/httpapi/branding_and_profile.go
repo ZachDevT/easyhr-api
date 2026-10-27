@@ -123,11 +123,63 @@ func (s *Server) getMe(c echo.Context) error {
 		&websiteURL, &contactEmail, &contactPhone, &addr1, &addr2, &city, &adminArea, &postalCode,
 	)
 
+	// 5. Workspaces linked to this user account
+	type userWorkspaceItem struct {
+		ID         string `json:"id"`
+		Name       string `json:"name"`
+		Subdomain  string `json:"subdomain"`
+		BrandColor string `json:"brandColor"`
+		LogoURL    string `json:"logoUrl"`
+		Role       string `json:"role"`
+		IsCurrent  bool   `json:"isCurrent"`
+	}
+	userWorkspaces := make([]userWorkspaceItem, 0)
+	if principal.UserID != "" {
+		wRows, wErr := s.pool.Query(ctx, `
+			SELECT 
+				o.id::text,
+				o.name,
+				COALESCE(w.subdomain, ''),
+				COALESCE(w.brand_color, '#2563EB'),
+				COALESCE(w.logo_url, ''),
+				COALESCE(r.display_name, 'Member')
+			FROM memberships m
+			JOIN organizations o ON o.id = m.organization_id
+			LEFT JOIN workspaces w ON w.organization_id = o.id
+			LEFT JOIN membership_roles mr ON mr.membership_id = m.id
+			LEFT JOIN roles r ON r.id = mr.role_id
+			WHERE m.user_id = $1::uuid AND m.status = 'active'
+			ORDER BY o.name ASC
+		`, principal.UserID)
+		if wErr == nil {
+			defer wRows.Close()
+			for wRows.Next() {
+				var uw userWorkspaceItem
+				if scanErr := wRows.Scan(&uw.ID, &uw.Name, &uw.Subdomain, &uw.BrandColor, &uw.LogoURL, &uw.Role); scanErr == nil {
+					uw.IsCurrent = (uw.ID == principal.OrganizationID)
+					userWorkspaces = append(userWorkspaces, uw)
+				}
+			}
+		}
+	}
+	if len(userWorkspaces) == 0 && orgName != "" {
+		userWorkspaces = append(userWorkspaces, userWorkspaceItem{
+			ID:         principal.OrganizationID,
+			Name:       orgName,
+			Subdomain:  subdomain,
+			BrandColor: brandColor,
+			LogoURL:    logoURL,
+			Role:       userRole,
+			IsCurrent:  true,
+		})
+	}
+
 	return c.JSON(http.StatusOK, map[string]any{
 		"userId":         principal.UserID,
 		"membershipId":   principal.MembershipID,
 		"organizationId": principal.OrganizationID,
 		"permissions":    permissions,
+		"workspaces":      userWorkspaces,
 		"user": map[string]any{
 			"id":             principal.UserID,
 			"email":          userEmail,
