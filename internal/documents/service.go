@@ -192,6 +192,9 @@ func (service *Service) CompleteUpload(ctx context.Context, organizationID, acto
 	if err != nil {
 		return Document{}, err
 	}
+	if result.Status == "available" || result.Status == "ready" {
+		return result, nil
+	}
 	if result.Status != "pending_upload" && result.Status != "pending_scan" {
 		return Document{}, ErrDocumentNotCompletable
 	}

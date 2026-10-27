@@ -234,6 +234,7 @@ func (s *Server) registerRoutes() {
 	s.echo.GET("/api/v1/public/check-subdomain", s.checkSubdomainAvailability)
 	s.echo.GET("/api/v1/public/invitation", s.getInvitationByToken, s.publicLimit)
 	s.echo.GET("/api/v1/auth/invitation", s.getInvitationByToken, s.publicLimit)
+	s.echo.PUT("/api/v1/documents/:documentId/content", s.uploadDocumentContent)
 
 	s.registerDocs()
 
@@ -310,6 +311,7 @@ func (s *Server) registerRoutes() {
 		s.api.POST("/signatures/:id/sign", s.signSignatureRequest)
 		s.api.POST("/signatures/:id/decline", s.declineSignatureRequest)
 		s.api.POST("/documents/upload-intents", s.createDocumentUploadIntent)
+		s.api.PUT("/documents/:documentId/content", s.uploadDocumentContent)
 		s.api.GET("/documents", s.listDocuments)
 		s.api.POST("/documents/:documentId/complete", s.completeDocumentUpload)
 		s.api.GET("/documents/:documentId/download-url", s.getDocumentDownloadUrl)
@@ -753,7 +755,7 @@ func (s *Server) createDocumentUploadIntent(c echo.Context) error {
 	if !ok {
 		return problem(c, http.StatusInternalServerError, "identity.context_missing", "Internal server error", "Authenticated identity context is missing")
 	}
-	if !principal.HasPermission("documents:upload") && !principal.HasPermission("documents:manage") {
+	if !principal.HasPermission("documents:upload") && !principal.HasPermission("documents:manage") && !principal.HasPermission("organization:manage") && !principal.HasPermission("employees:manage") {
 		return problem(c, http.StatusForbidden, "authorization.insufficient_scope", "Forbidden", "You do not have permission to upload employee documents")
 	}
 	var input documents.CreateUploadIntentInput
@@ -767,7 +769,112 @@ func (s *Server) createDocumentUploadIntent(c echo.Context) error {
 	if err != nil {
 		return problem(c, http.StatusUnprocessableEntity, "validation.invalid_document_upload", "Invalid document upload", err.Error())
 	}
+
+	// Route uploads through the backend proxy URL so browsers never fail CORS preflights against R2
+	scheme := "https"
+	proto := c.Request().Header.Get("X-Forwarded-Proto")
+	if proto != "" {
+		scheme = proto
+	} else if c.Request().TLS == nil {
+		scheme = "http"
+	}
+	host := c.Request().Host
+	result.UploadURL = fmt.Sprintf("%s://%s/api/v1/documents/%s/content", scheme, host, result.Document.ID)
+
 	return c.JSON(http.StatusCreated, result)
+}
+
+func (s *Server) uploadDocumentContent(c echo.Context) error {
+	documentID := c.Param("documentId")
+	ctx := c.Request().Context()
+
+	principal, hasPrincipal := identity.PrincipalFromContext(ctx)
+
+	var orgID string
+	var objectKey string
+	var status string
+	var expiresAt time.Time
+	err := s.pool.QueryRow(ctx, `SELECT organization_id::text, object_key, status, upload_expires_at FROM documents WHERE id = $1`, documentID).Scan(&orgID, &objectKey, &status, &expiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return problem(c, http.StatusNotFound, "documents.not_found", "Not found", "The requested document was not found")
+	}
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "documents.query_failed", "Internal server error", err.Error())
+	}
+
+	if hasPrincipal && principal.OrganizationID != orgID {
+		return problem(c, http.StatusForbidden, "authorization.forbidden", "Forbidden", "You do not have access to upload to this document")
+	}
+
+	if status == "deleted" || status == "quarantined" {
+		return problem(c, http.StatusGone, "documents.invalid_state", "Invalid state", "The document is no longer active")
+	}
+
+	if time.Now().UTC().After(expiresAt) {
+		return problem(c, http.StatusGone, "documents.expired", "Expired", "Upload intent window has expired")
+	}
+
+	contentType := c.Request().Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	body := c.Request().Body
+	defer body.Close()
+
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return problem(c, http.StatusBadRequest, "documents.read_failed", "Bad Request", "Could not read uploaded document data")
+	}
+
+	actualSize := int64(len(data))
+	digest := sha256.Sum256(data)
+	checksumSha256 := hex.EncodeToString(digest[:])
+
+	// Stream object directly to storage
+	if s.storage != nil {
+		if err := s.storage.PutObject(ctx, objectKey, contentType, bytes.NewReader(data), actualSize); err != nil {
+			return problem(c, http.StatusInternalServerError, "documents.storage_failed", "Storage error", fmt.Sprintf("Failed to persist document to storage: %v", err))
+		}
+	}
+
+	actorUserID := "system"
+	if hasPrincipal {
+		actorUserID = principal.UserID
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		UPDATE documents
+		SET status = 'available', sha256 = lower($1), size_bytes = $2
+		WHERE id = $3
+	`, checksumSha256, actualSize, documentID)
+	if err != nil {
+		return problem(c, http.StatusInternalServerError, "documents.update_failed", "Internal server error", err.Error())
+	}
+
+	_, _ = s.pool.Exec(ctx, `
+		INSERT INTO document_versions (document_id, version_number, object_key, sha256, size_bytes, created_by_user_id)
+		VALUES ($1, 1, $2, lower($3), $4, $5)
+		ON CONFLICT (document_id, version_number) DO NOTHING
+	`, documentID, objectKey, checksumSha256, actualSize, actorUserID)
+
+	_, _ = s.pool.Exec(ctx, `
+		INSERT INTO outbox_events (organization_id, event_type, aggregate_type, aggregate_id, payload)
+		VALUES ($1, 'document.scan_requested', 'document', $2, jsonb_build_object('documentId', $2::text, 'objectKey', $3::text))
+	`, orgID, documentID, objectKey)
+
+	_, _ = s.pool.Exec(ctx, `
+		INSERT INTO audit_events (organization_id, actor_user_id, action, resource_type, resource_id, request_id)
+		VALUES ($1, $2, 'document.upload_completed', 'document', $3, 'unknown')
+	`, orgID, actorUserID, documentID)
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"ok":             true,
+		"documentId":     documentID,
+		"status":         "available",
+		"checksumSha256": checksumSha256,
+		"sizeBytes":      actualSize,
+	})
 }
 
 func (s *Server) completeDocumentUpload(c echo.Context) error {
